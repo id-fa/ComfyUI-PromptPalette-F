@@ -1118,6 +1118,8 @@ function processTextForPreview(text, separator = ", ", addNewline = false, separ
         if (line.includes("//")) {
             line = line.split("//")[0].trimEnd();
         }
+        // Remove group tags
+        line = removeGroupTags(line);
         if (line.trim()) {
             filteredLines.push(line.trimEnd());
         }

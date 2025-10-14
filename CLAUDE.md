@@ -104,6 +104,8 @@ The project follows ComfyUI's custom node structure:
    - **Real-time preview**: Displays processed output in preview area at bottom of node
    - **Text generation**: `generatePreview()` replicates Python processing logic (lines 1107-1130)
    - **Text processing**: `processTextForPreview()` mirrors backend `process()` method (lines 1132-1176)
+   - **Group tag removal**: Automatically removes group tags `[group]` from preview using `removeGroupTags()` (line 1122)
+   - **Escape character support**: Preserves literal brackets `\[` `\]` in preview output
    - **Scrollable display**: Preview supports scrolling for long output with scroll buttons
    - **Scroll management**: Tracks scroll offset and calculates max scroll based on line count
    - **Visual rendering**: `drawPreview()` handles canvas drawing with proper layout (lines 1178-1275)
