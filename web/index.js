@@ -3,6 +3,7 @@ import { app } from "../../scripts/app.js";
 const CONFIG = {
     minNodeHeight: 80,
     topNodePadding: 40,
+    widgetSpacing: 5,        // Space between widgets and custom drawing
     sideNodePadding: 14,
     lineHeight: 24,
     fontSize: 14,
@@ -445,6 +446,27 @@ function adjustWeightInText(textWidget, lineIndex, delta, app) {
 // Text Wrapping Utilities
 // ========================================
 
+function getWidgetsTotalHeight(node) {
+    if (!node.widgets || node.widgets.length === 0) return 30;
+
+    let totalHeight = 0;
+    for (const widget of node.widgets) {
+        // Skip hidden widgets
+        if (widget.hidden) continue;
+
+        if (widget.computeSize) {
+            const size = widget.computeSize(node.size[0]);
+            totalHeight += size[1] + 4; // Add some margin
+        } else {
+            // Default height for widgets without computeSize
+            totalHeight += 30;
+        }
+    }
+
+    // Add some padding
+    return totalHeight + 20;
+}
+
 function wrapText(ctx, text, maxWidth) {
     if (!text.trim()) return [''];
     
@@ -531,10 +553,10 @@ function drawCheckboxList(node, ctx, text, app) {
     });
     
     // Adjust node size to match wrapped text line count + preview area (if shown) + group area
-    const baseTextHeight = Math.max(CONFIG.minNodeHeight, CONFIG.topNodePadding + groupAreaHeight + totalWrappedLines * CONFIG.lineHeight + 20);
-    const widgetSpacing = 70; // Space for ComfyUI widgets (buttons)
+    const baseTextHeight = Math.max(CONFIG.minNodeHeight, CONFIG.widgetSpacing + groupAreaHeight + totalWrappedLines * CONFIG.lineHeight + 20);
+    const widgetsHeight = getWidgetsTotalHeight(node); // Dynamic calculation of widget heights
     const previewHeight = node.hidePreview ? 0 : (CONFIG.previewSeparator + CONFIG.previewHeight);
-    const totalHeight = baseTextHeight + widgetSpacing + previewHeight;
+    const totalHeight = baseTextHeight + widgetsHeight + previewHeight;
     
     if (node.size[1] !== totalHeight) {
         node.size[1] = totalHeight;
@@ -550,9 +572,10 @@ function drawCheckboxList(node, ctx, text, app) {
         // If text is empty
         ctx.fillStyle = getColors().inactiveTextColor;
         ctx.textAlign = "center";
-        const widgetAndPreviewHeight = node.hidePreview ? 70 : (70 + CONFIG.previewHeight + CONFIG.previewSeparator);
+        const widgetHeight = getWidgetsTotalHeight(node);
+        const widgetAndPreviewHeight = node.hidePreview ? widgetHeight : (widgetHeight + CONFIG.previewHeight + CONFIG.previewSeparator);
         const textAreaHeight = node.size[1] - widgetAndPreviewHeight;
-        ctx.fillText("No Text", node.size[0]/2, CONFIG.topNodePadding + textAreaHeight/2);
+        ctx.fillText("No Text", node.size[0]/2, widgetHeight + CONFIG.widgetSpacing + textAreaHeight/2);
     }
     
     // Draw preview area
@@ -564,7 +587,8 @@ function drawCheckboxItems(ctx, lines, node) {
     const groups = getAllGroups(lines.join('\n'));
     const groupAreaHeight = groups.length > 0 ? CONFIG.groupAreaHeight : 0;
 
-    let currentY = CONFIG.topNodePadding + groupAreaHeight;
+    const widgetsHeight = getWidgetsTotalHeight(node);
+    let currentY = widgetsHeight + CONFIG.widgetSpacing + groupAreaHeight;
     const availableWidth = calculateAvailableTextWidth(node.size[0]);
 
     // Don't clear clickableAreas here - group controls have already been added
@@ -692,7 +716,8 @@ function getPhraseText(line, isCommented) {
 function drawGroupControls(node, ctx, text, groups) {
     if (groups.length === 0) return 0;
 
-    const y = CONFIG.topNodePadding;
+    const widgetsHeight = getWidgetsTotalHeight(node);
+    const y = widgetsHeight + CONFIG.widgetSpacing;
     const buttonHeight = CONFIG.groupButtonHeight;
     const margin = CONFIG.groupButtonMargin;
     let currentX = CONFIG.sideNodePadding;
@@ -1158,10 +1183,9 @@ function drawPreview(node, ctx) {
         const nodeWidth = node.size[0];
         const nodeHeight = node.size[1];
     
-    // Calculate preview area (position above the widget area)
-    // ComfyUI widgets are typically placed at the bottom, so we position preview above them
-    const widgetAreaHeight = 75; // Space for widgets (Edit, Hide Preview buttons)
-    const previewY = nodeHeight - CONFIG.previewHeight - widgetAreaHeight;
+    // Calculate preview area (at the bottom of the node)
+    // Widgets are now at the top, so preview goes at the bottom
+    const previewY = nodeHeight - CONFIG.previewHeight - 10; // 10px padding from bottom
     const previewX = CONFIG.sideNodePadding;
     const previewWidth = nodeWidth - CONFIG.sideNodePadding * 2;
 
