@@ -114,6 +114,13 @@ The project follows ComfyUI's custom node structure:
    - **Automatic text wrapping**: Preview text wraps within available width
    - **Theme integration**: Uses theme colors for consistent appearance
 
+12. **Dynamic Widget Height System** (`web/index.js:449-468`):
+   - **Automatic height calculation**: `getWidgetsTotalHeight()` dynamically calculates widget area height
+   - **Hidden widget handling**: Skips hidden widgets (text, separator, etc.) when calculating height
+   - **ComfyUI version compatibility**: Adapts to different ComfyUI versions automatically
+   - **Flexible spacing**: Uses `CONFIG.widgetSpacing` (5px) for minimal gap between widgets and content
+   - **Layout optimization**: Ensures buttons are visible and content is properly positioned regardless of ComfyUI version
+
 ## Development Commands
 
 This project requires no build process or package management - it's a pure ComfyUI extension.
@@ -128,10 +135,13 @@ This project requires no build process or package management - it's a pure Comfy
 ## Development Notes
 
 - No dependencies beyond ComfyUI itself
-- UI constants are defined in `CONFIG` object (`web/index.js:3-25`)
+- UI constants are defined in `CONFIG` object (`web/index.js:3-26`)
+  - Includes `widgetSpacing` (5px) for dynamic layout adaptation
+  - Other layout constants for consistent UI appearance
 - Click handling uses coordinate-based area detection system
 - All state changes trigger canvas redraws via `app.graph.setDirtyCanvas(true)`
 - Group functionality requires no additional dependencies
+- Dynamic widget height calculation ensures compatibility across ComfyUI versions
 
 ## Key Patterns
 
@@ -149,16 +159,16 @@ This project requires no build process or package management - it's a pure Comfy
 ## Code Organization
 
 ### web/index.js Structure:
-- **Configuration**: Lines 3-25 (CONFIG object with UI constants)
+- **Configuration**: Lines 3-26 (CONFIG object with UI constants, including widgetSpacing)
 - **Group Parsing Functions**: Lines 31-147 (group tag extraction, status tracking, simplified toggle logic, global toggles)
 - **Extension Registration**: Lines 149-206 (ComfyUI extension setup, callbacks)
 - **UI Control Functions**: Lines 212-398 (widget management, click handling, interaction)
-- **Text Wrapping Utilities**: Lines 445-474 (text wrapping, width calculation)
-- **Drawing Functions**: Lines 480-952 (canvas rendering, checkboxes, phrases, group controls, weight buttons, clickable text areas)
-- **Comment Parsing**: Lines 650-664 (description comment handling)
-- **Weight System**: Lines 957-1008 (parsing, adjustment, formatting)
-- **Theme/Color System**: Lines 1014-1053 (dynamic theme integration, color caching)
-- **Preview System**: Lines 1059-1298 (preview generation, rendering, scrolling)
+- **Text Wrapping Utilities**: Lines 449-489 (dynamic widget height calculation, text wrapping, width calculation)
+- **Drawing Functions**: Lines 495-967 (canvas rendering, checkboxes, phrases, group controls, weight buttons, clickable text areas)
+- **Comment Parsing**: Lines 665-679 (description comment handling)
+- **Weight System**: Lines 972-1023 (parsing, adjustment, formatting)
+- **Theme/Color System**: Lines 1029-1068 (dynamic theme integration, color caching)
+- **Preview System**: Lines 1074-1313 (preview generation, rendering, scrolling)
 
 ### nodes.py Structure:
 - **Class Definition**: Lines 5-91 (PromptPalette_F class)
@@ -176,6 +186,7 @@ Standard ComfyUI custom node installation - clone into `custom_nodes` directory 
 - Scroll functionality: ✅ Working (scroll bar visibility fixed)
 - Group toggle: ✅ Working (multi-group interference bug resolved)
 - Row selection: ✅ Working (clickable text areas implemented)
+- ComfyUI version compatibility: ✅ Working (dynamic widget height system implemented)
 
 ## Fixed Issues
 
@@ -200,3 +211,47 @@ Standard ComfyUI custom node installation - clone into `custom_nodes` directory 
   - Scroll thumb: `#555555` (medium gray)
   - Scroll buttons: `#3a3a3a` (dark gray)
 - **Status**: ✅ Resolved
+
+### ComfyUI Version Update Layout Issues (Resolved - December 2025)
+- **Issue**: After ComfyUI version update, Edit/Save buttons were not visible or positioned incorrectly
+- **Root Cause**:
+  - Fixed widget height values (70px, 75px) didn't match new ComfyUI widget layout
+  - Hidden widgets were counted in height calculations
+  - New ComfyUI versions position widgets at the top of the node
+- **Solution**:
+  - Implemented `getWidgetsTotalHeight()` function to dynamically calculate widget heights
+  - Skip hidden widgets when calculating total height
+  - Adjusted custom drawing start positions to account for widget area
+  - Added `CONFIG.widgetSpacing` (5px) for minimal spacing between widgets and content
+  - Changed from fixed spacing values to dynamic calculations based on actual widget sizes
+- **Status**: ✅ Resolved
+- **Code Location**: `web/index.js:449-468` (getWidgetsTotalHeight), `web/index.js:6` (widgetSpacing config)
+
+## ComfyUI Compatibility
+
+### Supported Versions
+- **Classic Mode**: ✅ Fully compatible with all recent ComfyUI versions
+- **Nodes 2.0 (Beta)**: ⚠️ Limited compatibility (buttons may not be clickable)
+
+### Nodes 2.0 Status
+ComfyUI Nodes 2.0 (released December 2, 2025 in v0.3.76) represents a major architectural change from LiteGraph.js to Vue.js-based rendering.
+
+**Current Limitations:**
+- Custom widgets (Edit/Save buttons) may not respond to clicks in Nodes 2.0 mode
+- No official migration guide available yet for custom node developers
+- Beta status indicates potential for breaking changes
+
+**Recommendations:**
+- Use Classic mode (default) for full functionality
+- Nodes 2.0 compatibility will be addressed once official migration documentation is available
+- ComfyUI allows toggling between Classic and Nodes 2.0 modes in settings
+- The ComfyUI team prioritizes third-party node compatibility and is working on comprehensive migration guides
+
+**Future Plans:**
+- Monitor ComfyUI GitHub issues for Nodes 2.0 custom node migration guides
+- Implement Vue.js-based widgets when official patterns are documented
+- Maintain backward compatibility with Classic mode
+
+**References:**
+- [ComfyUI Nodes 2.0 Documentation](https://docs.comfy.org/interface/nodes-2)
+- [ComfyUI GitHub - Custom Node Schema](https://github.com/comfyanonymous/ComfyUI/issues/8580)
