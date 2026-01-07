@@ -13,6 +13,7 @@ The project follows ComfyUI's custom node structure:
 - **`__init__.py`**: Standard ComfyUI entry point that imports and exports node mappings and web directory
 - **`nodes.py`**: Backend Python logic containing the `PromptPalette_F` class that processes text input
 - **`web/index.js`**: Frontend JavaScript extension that registers with ComfyUI's app system to provide custom UI
+- **`pyproject.toml`**: Project metadata and ComfyUI registry configuration following the official specification
 
 ### Core Components
 
@@ -135,6 +136,8 @@ This project requires no build process or package management - it's a pure Comfy
 ## Development Notes
 
 - No dependencies beyond ComfyUI itself
+- Project metadata and registry information defined in `pyproject.toml`
+- Node display name in UI: "PromptPalette-F" (set in `nodes.py:94`)
 - UI constants are defined in `CONFIG` object (`web/index.js:3-26`)
   - Includes `widgetSpacing` (5px) for dynamic layout adaptation
   - Other layout constants for consistent UI appearance
@@ -175,10 +178,23 @@ This project requires no build process or package management - it's a pure Comfy
 - **Input Configuration**: Lines 7-22 (INPUT_TYPES with text, prefix, separator, output options)
 - **Group Tag Processing**: Lines 28-41 (remove_group_tags_with_escape method)
 - **Main Processing Logic**: Lines 43-90 (process method with filtering, joining, output formatting)
+- **Node Registration**: Lines 93-95 (NODE_CLASS_MAPPINGS with display name "PromptPalette-F", WEB_DIRECTORY)
+
+### pyproject.toml Structure:
+- **[project] section**: Project metadata including name, version, description, license, Python requirements
+- **[project.urls] section**: Repository URL pointing to GitHub
+- **[tool.comfy] section**: ComfyUI-specific configuration including PublisherId ("id-fa") and DisplayName ("PromptPalette-F")
 
 ## Installation & Usage
 
 Standard ComfyUI custom node installation - clone into `custom_nodes` directory and restart ComfyUI. No additional setup or dependencies required.
+
+### ComfyUI Registry
+This project includes `pyproject.toml` for ComfyUI registry publication following the [official specification](https://docs.comfy.org/registry/specifications):
+- **Project name**: `promptpalette-f` (registry identifier)
+- **Display name**: `PromptPalette-F` (shown in UI)
+- **Publisher**: `id-fa`
+- **Repository**: https://github.com/id-fa/ComfyUI-PromptPalette-F
 
 ## Development Status
 - Basic functionality: ✅ Working
