@@ -91,5 +91,5 @@ class PromptPalette_F:
 
 
 NODE_CLASS_MAPPINGS = {"PromptPalette_F": PromptPalette_F}
-NODE_DISPLAY_NAME_MAPPINGS = {"PromptPalette_F": "ComfyUI-PromptPalette-F"}
+NODE_DISPLAY_NAME_MAPPINGS = {"PromptPalette_F": "PromptPalette-F"}
 WEB_DIRECTORY = os.path.join(os.path.dirname(os.path.realpath(__file__)), "web")
