@@ -8,16 +8,55 @@ ComfyUI-PromptPalette-F is a custom node for ComfyUI that provides an interactiv
 
 ## Architecture
 
-The project follows ComfyUI's custom node structure:
+The project follows ComfyUI's custom node structure with V3 API compliance and dual-mode frontend support:
 
-- **`__init__.py`**: Standard ComfyUI entry point that imports and exports node mappings and web directory
-- **`nodes.py`**: Backend Python logic containing the `PromptPalette_F` class that processes text input
-- **`web/index.js`**: Frontend JavaScript extension that registers with ComfyUI's app system to provide custom UI
-- **`pyproject.toml`**: Project metadata and ComfyUI registry configuration following the official specification
+- **`__init__.py`**: V1 API entry point (temporary fallback due to V3 web_directory issues)
+- **`nodes.py`**: V3/V1 hybrid backend with conditional V3 API support and V1 fallback
+- **`web/index.js`**: Dual-mode frontend with adaptive detection for Classic (LiteGraph.js) and Nodes 2.0 (Vue.js) rendering
+- **`pyproject.toml`**: Project metadata and ComfyUI registry configuration (version 2.0.0)
+
+### API Version Support
+
+**Backend (V3/V1 Hybrid) - `nodes.py`:**
+- **V3 API Support (conditional)**:
+  - Conditionally inherits from `comfy_api.latest.io.ComfyNode` if V3 API available
+  - Uses `define_schema()` for input/output configuration when V3 available
+  - Implements `execute()` classmethod (not `process()`)
+  - Returns `io.NodeOutput()` wrapper when V3 available
+  - Includes `comfy_entrypoint()` for V3 extension registration
+- **V1 API Fallback**:
+  - Falls back to plain object inheritance if V3 API unavailable
+  - Always includes `INPUT_TYPES()` method for V1 compatibility
+  - Returns tuple format when V3 unavailable
+  - Maintains V1 exports (`NODE_CLASS_MAPPINGS`, `NODE_DISPLAY_NAME_MAPPINGS`, `WEB_DIRECTORY`)
+- **Why Hybrid**: V3 `web_directory` property implementation has issues, so V1 exports are used for JavaScript file loading
+
+**Entry Point - `__init__.py`:**
+- **Current Strategy**: V1-only exports (temporary)
+- **Reason**: V3 `web_directory` property in `ComfyExtension` class doesn't correctly serve `web/index.js`
+- **Implementation**: Directly exports `NODE_CLASS_MAPPINGS`, `NODE_DISPLAY_NAME_MAPPINGS`, `WEB_DIRECTORY` from nodes.py
+- **Future**: Will switch to V3 `comfy_entrypoint()` once web_directory issue is resolved
+
+**Frontend (Adaptive Dual Mode) - `web/index.js`:**
+- **Classic Mode (LiteGraph.js)**: Full feature support with canvas rendering
+- **Nodes 2.0 Mode (Vue.js)**: Basic support - text editing only, advanced features disabled
+- **Adaptive Mode Detection**: Uses `onDrawForeground` callback invocation as mode indicator
+  - If `onDrawForeground` called → Classic mode (canvas rendering works)
+  - If `onDrawForeground` not called after 100ms → Nodes 2.0 mode (canvas rendering unavailable)
+  - Why adaptive: Traditional detection methods (`app.vueAppReady`, `window.Vue`, `window.LiteGraph`) are unreliable
+- Mode selection logged to console for debugging
+- Global `window.__PromptPalette_F_Mode` variable tracks current mode
 
 ### Core Components
 
-1. **PromptPalette_F Node** (`nodes.py:5-91`):
+1. **PromptPalette_F Node (V3/V1 Hybrid)** (`nodes.py:21-153`):
+   - **Conditional V3 Schema** (lines 23-59): Defined via `define_schema()` classmethod when V3 available
+     - Input types: Uses `io.String.Input()` and `io.Boolean.Input()` (not string-based)
+     - Important: `rows` parameter not supported by V3 API (removed after initial error)
+   - **V1 INPUT_TYPES** (lines 62-78): Always defined for backward compatibility
+     - String-based types: `"STRING"`, `"BOOLEAN"`
+     - Uses `forceInput` (V1 style) instead of `force_input` (V3 style)
+   - **Execution**: `execute()` classmethod processes text (lines 101-151)
    - Processes multiline text input by filtering commented lines (lines starting with `//` or `#`)
    - Handles inline comments by splitting on `//` and keeping only the content before
    - Uses custom separator (default: `, `) to join non-commented lines
@@ -26,15 +65,28 @@ The project follows ComfyUI's custom node structure:
    - Supports adding newline at end of output (`add_newline` parameter)
    - Supports adding newline after separator (`separator_newline` parameter)
    - Supports trailing separator (`trailing_separator` parameter)
-   - **Group tag filtering**: Removes group tags `[group]` from output using `remove_group_tags_with_escape()` method (`nodes.py:28-41`)
+   - **Group tag filtering**: Removes group tags `[group]` from output using `remove_group_tags_with_escape()` staticmethod (lines 84-98)
    - **Escape character support**: Preserves literal brackets using `\[` and `\]` escape sequences
-   - Returns formatted string output with group tags removed
+   - **Conditional return format**: Returns `io.NodeOutput()` if V3 available, tuple otherwise (lines 150-153)
+   - **V3 Extension** (lines 157-167): Only defined if V3 API available, exported via `comfy_entrypoint()` async function
 
-2. **Web Extension** (`web/index.js:197-254`):
-   - Registers as ComfyUI extension named "PromptPalette_F"
-   - Hooks into `beforeRegisterNodeDef` to modify PromptPalette_F node behavior
-   - Sets up node creation callback and drawing callback
-   - Manages edit/display mode toggling
+2. **Web Extension - Adaptive Dual Mode** (`web/index.js`):
+   - **Single Unified Registration** (lines 149-246): Single extension "PromptPalette_F" that adapts to rendering mode
+   - **Adaptive Mode Detection via Callbacks**:
+     - `onNodeCreated` (lines 159-206): Sets up both Classic and Nodes 2.0 features initially
+       - Initializes `_promptPalette_drawCalled` and `_promptPalette_setupDone` flags
+       - Creates all Classic mode widgets (hidden initially)
+       - Creates Nodes 2.0 warning widget (hidden initially)
+     - `onDrawForeground` (lines 208-230): Canvas rendering callback - ONLY invoked in Classic mode
+       - When called: Marks as Classic mode, hides Nodes 2.0 warning
+       - Performs custom canvas drawing for checkboxes, groups, weights, preview
+     - `onAdded` (lines 232-244): Delayed detection with 100ms timeout
+       - If `onDrawForeground` wasn't called: Marks as Nodes 2.0 mode, shows warning widget
+       - Makes all input widgets visible (no custom edit mode in Nodes 2.0)
+   - **Why Adaptive Detection**:
+     - `app.vueAppReady` is `true` in both Classic and Nodes 2.0 modes (unreliable)
+     - `window.Vue` and `window.LiteGraph` checks are unreliable
+     - Canvas callback invocation is the only reliable indicator
 
 3. **UI System**:
    - **Edit mode**: Shows standard multiline text widget, separator input, and newline options for direct editing
@@ -127,11 +179,77 @@ The project follows ComfyUI's custom node structure:
 This project requires no build process or package management - it's a pure ComfyUI extension.
 
 ### Testing
-- **Manual testing**: Install in ComfyUI's `custom_nodes` directory and restart ComfyUI
-- **UI verification**: Test through ComfyUI's interface - create node, toggle edit/display modes, test phrase toggling, weight adjustment, group controls, and global toggle buttons
-- **Group testing**: Test with lines like `phrase1 [group1]`, `phrase2 [group1][group2]`, and escaped brackets `phrase \[literal\] [group1]`
-- **Global toggle testing**: Test `[all]` and `[off]` buttons to ensure all phrases toggle correctly
-- **No automated tests**: Testing is entirely manual through the ComfyUI interface
+
+#### Installation
+- Install in ComfyUI's `custom_nodes` directory and restart ComfyUI
+- No build process or dependencies required
+
+#### Classic Mode Testing (Full Features)
+1. **Mode Verification**:
+   - Open browser console, look for: `[PromptPalette_F] Classic mode detected (onDrawForeground called)`
+   - Check `window.__PromptPalette_F_Mode` returns `"classic"`
+
+2. **Basic Functionality**:
+   - Create PromptPalette-F node
+   - Toggle Edit/Display modes with button
+   - Test phrase toggling with checkboxes
+   - Test weight adjustment (+/- buttons)
+   - Test custom separator and output options
+
+3. **Group Testing**:
+   - Test with `phrase1 [group1]`
+   - Test multi-group: `phrase2 [group1][group2]`
+   - Test escaped brackets: `phrase \[literal\] [group1]`
+   - Test group buttons for batch toggling
+   - Test global `[all]` and `[off]` buttons
+
+4. **Preview Panel**:
+   - Toggle preview visibility
+   - Verify real-time preview updates
+   - Test preview scrolling with long output
+
+#### Nodes 2.0 Mode Testing (Basic Support)
+1. **Mode Verification**:
+   - Enable Nodes 2.0 in ComfyUI settings (usually under Interface)
+   - Open browser console, look for: `[PromptPalette_F] Nodes 2.0 mode detected (onDrawForeground not called)`
+   - Check `window.__PromptPalette_F_Mode` returns `"nodes2"`
+
+2. **Basic Functionality**:
+   - Create PromptPalette-F node
+   - Verify warning widget is visible
+   - Test text input (multiline editing)
+   - Test all input parameters (separator, prefix, output options)
+   - Verify backend processing produces correct output
+
+3. **Expected Limitations**:
+   - No Edit/Display mode toggle
+   - No interactive checkboxes
+   - No weight adjustment controls
+   - No group buttons
+   - No preview panel
+   - All features work through standard widget inputs only
+
+#### Mode Switching Testing
+1. **Classic → Nodes 2.0**:
+   - Start in Classic mode, create node with some content
+   - Switch to Nodes 2.0 mode in settings, refresh page
+   - Verify mode detection switches correctly
+   - Verify node content is preserved
+
+2. **Nodes 2.0 → Classic**:
+   - Start in Nodes 2.0 mode, create node with some content
+   - Switch to Classic mode in settings, refresh page
+   - Verify mode detection switches correctly
+   - Verify all Classic features work
+
+#### Console Log Monitoring
+- Mode detection logs appear on node creation
+- No errors should appear during normal operation
+- Check for V3 API import errors (should gracefully fall back to V1)
+
+#### No Automated Tests
+- Testing is entirely manual through the ComfyUI interface
+- All verification done through browser console and visual inspection
 
 ## Development Notes
 
@@ -161,24 +279,37 @@ This project requires no build process or package management - it's a pure Comfy
 
 ## Code Organization
 
-### web/index.js Structure:
+### web/index.js Structure (1,444 lines):
 - **Configuration**: Lines 3-26 (CONFIG object with UI constants, including widgetSpacing)
-- **Group Parsing Functions**: Lines 31-147 (group tag extraction, status tracking, simplified toggle logic, global toggles)
-- **Extension Registration**: Lines 149-206 (ComfyUI extension setup, callbacks)
-- **UI Control Functions**: Lines 212-398 (widget management, click handling, interaction)
-- **Text Wrapping Utilities**: Lines 449-489 (dynamic widget height calculation, text wrapping, width calculation)
-- **Drawing Functions**: Lines 495-967 (canvas rendering, checkboxes, phrases, group controls, weight buttons, clickable text areas)
-- **Comment Parsing**: Lines 665-679 (description comment handling)
-- **Weight System**: Lines 972-1023 (parsing, adjustment, formatting)
-- **Theme/Color System**: Lines 1029-1068 (dynamic theme integration, color caching)
-- **Preview System**: Lines 1074-1313 (preview generation, rendering, scrolling)
+- **Group Parsing Functions**: Lines 28-147 (group tag extraction, status tracking, simplified toggle logic, global toggles)
+- **Unified Extension Registration**: Lines 149-246 (Single "PromptPalette_F" extension with adaptive mode detection)
+  - Lines 159-206: `onNodeCreated` callback - initializes both mode's features
+  - Lines 208-230: `onDrawForeground` callback - marks Classic mode when invoked
+  - Lines 232-244: `onAdded` callback - detects Nodes 2.0 mode if drawing didn't occur
+- **UI Control Functions**: Lines 248-535 (widget management, click handling, interaction) - Classic mode only
+- **Text Wrapping Utilities**: Lines 537-587 (dynamic widget height calculation, text wrapping, width calculation)
+- **Drawing Functions**: Lines 589-1086 (canvas rendering, checkboxes, phrases, group controls, weight buttons, clickable text areas) - Classic mode only
+- **Weight System**: Lines 1088-1143 (parsing, adjustment, formatting)
+- **Theme/Color System**: Lines 1145-1188 (dynamic theme integration, color caching)
+- **Preview System**: Lines 1190-1434 (preview generation, rendering, scrolling) - Classic mode only
+- **Entry Point**: Lines 1436-1444 (extension registration)
 
-### nodes.py Structure:
-- **Class Definition**: Lines 5-91 (PromptPalette_F class)
-- **Input Configuration**: Lines 7-22 (INPUT_TYPES with text, prefix, separator, output options)
-- **Group Tag Processing**: Lines 28-41 (remove_group_tags_with_escape method)
-- **Main Processing Logic**: Lines 43-90 (process method with filtering, joining, output formatting)
-- **Node Registration**: Lines 93-95 (NODE_CLASS_MAPPINGS with display name "PromptPalette-F", WEB_DIRECTORY)
+### nodes.py Structure (175 lines):
+- **V3 API Conditional Imports**: Lines 4-12 (try/except block for comfy_api.latest imports, V3_AVAILABLE flag, dummy ComfyNode class)
+- **Base Class Selection**: Lines 14-18 (conditionally inherit from io.ComfyNode or object)
+- **Class Definition**: Lines 21-153 (PromptPalette_F class with conditional V3/V1 support)
+  - Lines 23-59: Conditional V3 `define_schema()` classmethod (only if V3_AVAILABLE)
+  - Lines 62-78: V1 `INPUT_TYPES()` classmethod (always defined)
+  - Lines 80-82: V1-style class attributes (RETURN_TYPES, FUNCTION, CATEGORY)
+  - Lines 84-98: `remove_group_tags_with_escape()` staticmethod
+  - Lines 101-153: `execute()` classmethod with conditional return format
+- **V3 Extension**: Lines 157-167 (PromptPaletteExtension and comfy_entrypoint, only if V3_AVAILABLE)
+- **V1 Legacy Exports**: Lines 171-173 (NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS, WEB_DIRECTORY - always defined)
+
+### __init__.py Structure (5 lines):
+- **V1-only Entry Point**: Imports and exports V1 mappings directly from nodes.py
+- **Reason**: V3 `web_directory` property issue prevents JavaScript file loading
+- **Future**: Will be updated to use `comfy_entrypoint` when V3 web_directory is fixed
 
 ### pyproject.toml Structure:
 - **[project] section**: Project metadata including name, version, description, license, Python requirements
@@ -197,12 +328,73 @@ This project includes `pyproject.toml` for ComfyUI registry publication followin
 - **Repository**: https://github.com/id-fa/ComfyUI-PromptPalette-F
 
 ## Development Status
-- Basic functionality: ✅ Working
-- Preview functionality: ✅ Working (white screen bug resolved)
-- Scroll functionality: ✅ Working (scroll bar visibility fixed)
-- Group toggle: ✅ Working (multi-group interference bug resolved)
-- Row selection: ✅ Working (clickable text areas implemented)
-- ComfyUI version compatibility: ✅ Working (dynamic widget height system implemented)
+
+### V3 API Migration (v2.0.0) - January 2026
+- ✅ **V3 backend**: Complete with conditional V3/V1 hybrid approach
+  - V3 API support when available (ComfyNode inheritance, define_schema, execute, io.NodeOutput)
+  - Automatic V1 fallback when V3 unavailable (plain class, INPUT_TYPES, tuple return)
+- ✅ **V1 backward compatibility**: Complete (legacy exports always maintained)
+- ⚠️ **Entry point**: Temporarily using V1-only exports due to V3 web_directory issue
+  - Issue: V3 `ComfyExtension.web_directory` property doesn't serve JavaScript files correctly
+  - Workaround: Using V1 `WEB_DIRECTORY` export in `__init__.py`
+  - Future: Will switch to `comfy_entrypoint()` once issue resolved
+
+### Rendering Mode Support
+
+#### Classic Mode (LiteGraph.js): ✅ Fully Functional
+- ✅ Basic functionality: Text processing, separator controls, prefix input
+- ✅ Preview functionality: Real-time preview panel (white screen bug resolved)
+- ✅ Scroll functionality: Preview scrolling with visible scroll bar (visibility bug fixed)
+- ✅ Group toggle: Multi-group support (interference bug resolved)
+- ✅ Row selection: Clickable phrase text areas
+- ✅ Dynamic sizing: Widget height system for ComfyUI version compatibility
+- ✅ Weight controls: +/- buttons for weight adjustment
+- ✅ Edit/Display modes: Toggle between text editing and interactive UI
+
+#### Nodes 2.0 Mode (Vue.js): ⚠️ Basic Support Only (Phase 2A Complete)
+- ✅ **Adaptive mode detection**: Based on `onDrawForeground` callback invocation
+  - Tested and working correctly in both Classic and Nodes 2.0 environments
+  - Fixes issue where `app.vueAppReady` is true in both modes
+- ✅ **Text editing**: All input widgets visible and functional
+- ✅ **Backend processing**: Full text processing (same as Classic mode)
+- ✅ **Warning display**: Shows limitation notice to users
+- ⚠️ **Warning text wrapping**: Known issue - warning text doesn't wrap properly
+- ❌ **Advanced features**: Not available (Phase 2B - waiting for ComfyUI Vue API documentation)
+  - Interactive checkboxes
+  - Weight adjustment controls
+  - Group management buttons
+  - Live preview panel
+  - Edit/display mode toggling
+
+## Known Issues
+
+### V3 web_directory Property (Ongoing)
+- **Issue**: V3 `ComfyExtension.web_directory` property doesn't serve JavaScript files correctly
+- **Manifestation**: `web/index.js` returns 404 when using V3 entry point via `comfy_entrypoint()`
+- **Current Workaround**: Using V1 `WEB_DIRECTORY` export in `__init__.py`
+- **Impact**: Prevents full V3-only implementation, requires V1/V3 hybrid approach
+- **Status**: Under investigation, may be ComfyUI core issue
+- **Code Location**: `__init__.py:1-5`, `nodes.py:157-173`
+
+### Warning Widget Text Wrapping in Nodes 2.0 Mode (Ongoing)
+- **Issue**: Warning widget text in Nodes 2.0 mode doesn't wrap, requires wide window to read
+- **Current Text**: "⚠️ Limited Support" / "Advanced features require Classic mode.\nSwitch in ComfyUI settings."
+- **Attempted Fix**: Changed from long single-line text to shorter multi-line text (not effective)
+- **Impact**: Minor UX issue - warning message difficult to read in narrow windows
+- **Status**: Needs further investigation into ComfyUI widget text wrapping behavior
+- **Code Location**: `web/index.js:198-208`
+
+### Mode Detection Reliability (Partially Resolved)
+- **Issue**: Traditional mode detection methods are unreliable
+- **Problems Found**:
+  - `app.vueAppReady` is `true` in both Classic and Nodes 2.0 modes
+  - `window.Vue` and `window.LiteGraph` presence checks are inconsistent
+  - `app.ui.settings.getSettingValue('Comfy.UseNewUI')` not reliable
+- **Solution**: Implemented adaptive detection using `onDrawForeground` callback invocation
+  - Classic mode: `onDrawForeground` is called by LiteGraph.js rendering system
+  - Nodes 2.0 mode: `onDrawForeground` is never called by Vue.js rendering system
+- **Status**: ✅ Working correctly with adaptive detection
+- **Code Location**: `web/index.js:159-244`
 
 ## Fixed Issues
 
@@ -245,29 +437,186 @@ This project includes `pyproject.toml` for ComfyUI registry publication followin
 
 ## ComfyUI Compatibility
 
-### Supported Versions
-- **Classic Mode**: ✅ Fully compatible with all recent ComfyUI versions
-- **Nodes 2.0 (Beta)**: ⚠️ Limited compatibility (buttons may not be clickable)
+### API Version Support (v2.0.0+)
+- **V3 API**: ✅ Fully compliant (backend uses ComfyNode, define_schema, execute)
+- **V1 API**: ✅ Backward compatible (legacy exports maintained)
+- **Dual-mode frontend**: ✅ Supports both Classic and Nodes 2.0 rendering
 
-### Nodes 2.0 Status
-ComfyUI Nodes 2.0 (released December 2, 2025 in v0.3.76) represents a major architectural change from LiteGraph.js to Vue.js-based rendering.
+### Rendering Mode Support
 
-**Current Limitations:**
-- Custom widgets (Edit/Save buttons) may not respond to clicks in Nodes 2.0 mode
-- No official migration guide available yet for custom node developers
-- Beta status indicates potential for breaking changes
+#### Classic Mode (LiteGraph.js) - Full Features ✅
+- **Status**: Fully functional with all features
+- **Compatibility**: All recent ComfyUI versions
+- **Features**:
+  - ✅ Interactive checkboxes for phrase toggling
+  - ✅ Weight adjustment controls (+/- buttons)
+  - ✅ Group management buttons
+  - ✅ Global toggle buttons ([all]/[off])
+  - ✅ Live preview panel with scrolling
+  - ✅ Custom canvas rendering
+  - ✅ Edit/display mode toggling
+  - ✅ Text wrapping and dynamic sizing
+  - ✅ Theme-aware color system
 
-**Recommendations:**
-- Use Classic mode (default) for full functionality
-- Nodes 2.0 compatibility will be addressed once official migration documentation is available
-- ComfyUI allows toggling between Classic and Nodes 2.0 modes in settings
-- The ComfyUI team prioritizes third-party node compatibility and is working on comprehensive migration guides
+#### Nodes 2.0 Mode (Vue.js) - Basic Support ⚠️
+- **Status**: Minimal implementation (Phase 2A complete)
+- **Compatibility**: ComfyUI v0.3.76+ with Nodes 2.0 enabled
+- **Supported Features**:
+  - ✅ Text editing (multiline input)
+  - ✅ All input parameters (separator, prefix, output options)
+  - ✅ Backend text processing (same as Classic mode)
+- **Unavailable Features** (require Classic mode):
+  - ⚠️ Interactive checkboxes
+  - ⚠️ Weight adjustment controls
+  - ⚠️ Group management buttons
+  - ⚠️ Live preview panel
+  - ⚠️ Custom canvas rendering
+  - ⚠️ Edit/display mode toggling
 
-**Future Plans:**
-- Monitor ComfyUI GitHub issues for Nodes 2.0 custom node migration guides
-- Implement Vue.js-based widgets when official patterns are documented
-- Maintain backward compatibility with Classic mode
+**User Guidance:**
+- Node displays warning widget in Nodes 2.0 mode: "Advanced features (preview, groups, weights, checkboxes) are only available in Classic mode"
+- Users can toggle between Classic and Nodes 2.0 modes in ComfyUI settings
+- Mode selection automatically detected on startup and logged to console
+
+### Mode Detection Strategy
+
+**Adaptive Detection via Callback Invocation** (`web/index.js:159-244`):
+
+The extension uses an **adaptive detection approach** that determines the rendering mode based on whether canvas drawing callbacks are invoked, rather than checking environment variables upfront.
+
+**How It Works**:
+1. **Node Creation** (`onNodeCreated`): Sets up features for both modes initially
+   - Creates all widgets (hidden by default)
+   - Initializes detection flags: `_promptPalette_drawCalled`, `_promptPalette_setupDone`
+   - Both Classic and Nodes 2.0 widgets are prepared
+
+2. **Canvas Drawing** (`onDrawForeground`): Only invoked in Classic mode
+   - If called → Marks as Classic mode, enables canvas rendering
+   - Hides Nodes 2.0 warning widget
+   - Sets `window.__PromptPalette_F_Mode = 'classic'`
+
+3. **Delayed Detection** (`onAdded`): Checks after 100ms timeout
+   - If `onDrawForeground` wasn't called → Marks as Nodes 2.0 mode
+   - Shows warning widget, makes input widgets visible
+   - Sets `window.__PromptPalette_F_Mode = 'nodes2'`
+
+**Why Adaptive Detection**:
+- Traditional detection methods are unreliable:
+  - `app.vueAppReady` is `true` in **both** Classic and Nodes 2.0 modes
+  - `window.Vue` and `window.LiteGraph` checks are inconsistent
+  - Settings API (`app.ui.settings.getSettingValue('Comfy.UseNewUI')`) not reliable
+- **Callback invocation is the only reliable indicator**:
+  - LiteGraph.js (Classic mode) **always** calls `onDrawForeground` for canvas rendering
+  - Vue.js (Nodes 2.0 mode) **never** calls `onDrawForeground` (no canvas rendering)
+
+**Debug Information**:
+- Global variable: `window.__PromptPalette_F_Mode` (returns `"classic"` or `"nodes2"`)
+- Console logs: Mode detection logged on startup
+- Example: `[PromptPalette_F] Classic mode detected (onDrawForeground called)`
+
+### Migration History (v2.0.0 - January 2026)
+
+This section documents the V3 API and Nodes 2.0 migration process, including errors encountered and solutions implemented.
+
+#### Error 1: V3 API `rows` Parameter Not Supported
+- **Error**: `String.Input.__init__() got an unexpected keyword argument 'rows'`
+- **Context**: Initial V3 schema used `io.String.Input("text", default="", multiline=True, rows=8)`
+- **Solution**: Removed `rows` parameter, kept only `multiline=True`
+- **Learning**: V3 API doesn't support `rows` parameter for text inputs
+
+#### Error 2: JavaScript File Not Loading (404)
+- **Error**: `web/index.js` returned 404 when using V3 entry point
+- **Context**: After implementing `comfy_entrypoint()` in nodes.py and importing it in `__init__.py`
+- **Root Cause**: V3 `web_directory` property in `ComfyExtension` class doesn't serve files correctly
+- **Solution**: Reverted `__init__.py` to V1-only exports using `NODE_CLASS_MAPPINGS` and `WEB_DIRECTORY`
+- **Status**: Temporary workaround, waiting for V3 web_directory fix
+
+#### Error 3: Mode Detection Failures (Multiple Attempts)
+- **Attempt 1 - Environment Variables**: Used `app.vueAppReady`, `window.Vue`, `window.LiteGraph`
+  - **Failure**: `app.vueAppReady` is `true` in both Classic and Nodes 2.0 modes
+  - User provided console output showing identical values in both modes
+
+- **Attempt 2 - Canvas Constructor**: Checked `app.canvas.constructor.name`
+  - **Failure**: Both modes returned `LGraphCanvas`
+
+- **Attempt 3 - Pre-detection**: Used `isNodes2Mode()` function at registration time
+  - **Failure**: Incorrectly detected modes in both directions (Classic as Nodes 2.0, Nodes 2.0 as Classic)
+
+- **Final Solution - Adaptive Detection**: Used `onDrawForeground` callback invocation
+  - **Success**: Callback is called in Classic mode, not called in Nodes 2.0 mode
+  - Implemented 100ms timeout in `onAdded` to detect when callback isn't invoked
+  - User confirmed: "正しく動作していると思います" (I think it's working correctly)
+
+#### Implementation Timeline
+1. **V3 Backend Migration**: Implemented conditional V3/V1 hybrid in `nodes.py`
+2. **JavaScript Loading Issue**: Discovered and worked around V3 web_directory problem
+3. **Mode Detection Research**: Tried multiple detection strategies before finding reliable method
+4. **Adaptive Detection**: Implemented callback-based detection, tested and confirmed working
+5. **Documentation**: Updated CLAUDE.md with final implementation details
+
+#### Lessons Learned
+- V3 `web_directory` property implementation needs more work in ComfyUI core
+- Traditional environment checks are unreliable for detecting rendering mode
+- Callback invocation patterns are more reliable than environment variables
+- Always test mode detection in both Classic and Nodes 2.0 environments
+- Adaptive/lazy detection is more robust than pre-detection for runtime features
+
+#### Key Technical Decisions
+
+**1. V3/V1 Hybrid Approach in Backend**
+- **Decision**: Implement conditional V3 support with V1 fallback in single file
+- **Rationale**: Ensures compatibility with both old and new ComfyUI versions
+- **Implementation**: `try/except` block for V3 imports, conditional inheritance, dual return formats
+- **Trade-off**: Slightly more complex code, but maximum compatibility
+
+**2. V1-Only Entry Point (Temporary)**
+- **Decision**: Use V1 `WEB_DIRECTORY` export instead of V3 `comfy_entrypoint()`
+- **Rationale**: V3 web_directory property doesn't serve JavaScript files correctly
+- **Implementation**: Simple imports in `__init__.py` from `nodes.py`
+- **Future**: Will switch to V3-only when web_directory issue is resolved
+
+**3. Adaptive Mode Detection via Callbacks**
+- **Decision**: Detect mode based on whether `onDrawForeground` is called, not environment checks
+- **Rationale**: Environment variables (`app.vueAppReady`, `window.Vue`) are unreliable
+- **Implementation**: Initialize both modes' features, mark mode when callback invoked (or not)
+- **Trade-off**: 100ms detection delay in Nodes 2.0 mode, but reliability is worth it
+
+**4. Single Unified Extension (Not Separate Extensions)**
+- **Decision**: One extension that adapts to mode, not separate Classic/Nodes2 registrations
+- **Rationale**: Simpler architecture, avoids registration conflicts, easier to maintain
+- **Implementation**: Single `beforeRegisterNodeDef` with adaptive callbacks
+- **Trade-off**: Slightly more complex callback logic, but cleaner overall structure
+
+**5. Minimal Nodes 2.0 Support (Phase 2A)**
+- **Decision**: Implement basic text editing only, defer advanced features to Phase 2B
+- **Rationale**: No official Vue widget API documentation available yet
+- **Implementation**: Warning widget + visible input widgets, no custom UI
+- **Trade-off**: Limited features in Nodes 2.0, but users can still use the node for basic tasks
+
+**6. Preserve All Classic Mode Features**
+- **Decision**: Keep all existing canvas-rendering code unchanged
+- **Rationale**: Don't break working functionality during migration
+- **Implementation**: All canvas drawing code remains in place, only called in Classic mode
+- **Result**: Zero regression for existing users in Classic mode
+
+### Future Roadmap
+
+**Phase 2B: Full Nodes 2.0 Support** (Planned)
+- Waiting for ComfyUI Vue widget API documentation
+- Will implement Vue.js components for:
+  - Interactive checkboxes
+  - Weight controls
+  - Group buttons
+  - Preview panel
+- Target: Feature parity between Classic and Nodes 2.0 modes
+
+**Potential Improvements**:
+- Fix warning widget text wrapping in Nodes 2.0 mode
+- Investigate V3 web_directory issue with ComfyUI team
+- Switch to full V3 entry point when web_directory is fixed
+- Consider custom Vue.js widget implementation when API is documented
 
 **References:**
+- [ComfyUI V3 Migration Guide](https://docs.comfy.org/custom-nodes/v3_migration)
 - [ComfyUI Nodes 2.0 Documentation](https://docs.comfy.org/interface/nodes-2)
 - [ComfyUI GitHub - Custom Node Schema](https://github.com/comfyanonymous/ComfyUI/issues/8580)

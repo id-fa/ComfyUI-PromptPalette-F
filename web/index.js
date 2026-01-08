@@ -147,64 +147,145 @@ function toggleAllPhrases(text, activate) {
 }
 
 // ========================================
-// Extension Registration
+// Extension Registration - Adaptive Mode
 // ========================================
 
 app.registerExtension({
     name: "PromptPalette_F",
-    
+
     async beforeRegisterNodeDef(nodeType, nodeData, app) {
         if (nodeData.name === "PromptPalette_F") {
-            this.setupNodeCreatedCallback(nodeType, CONFIG, app);
-            this.setupDrawForegroundCallback(nodeType, CONFIG, app);
+            // Set up both Classic and Nodes 2.0 support
+            // Mode will be determined dynamically based on which callbacks are actually invoked
+            this.setupAdaptiveMode(nodeType, CONFIG, app);
         }
     },
 
-    setupNodeCreatedCallback(nodeType, config, app) {
+    setupAdaptiveMode(nodeType, config, app) {
         const origOnNodeCreated = nodeType.prototype.onNodeCreated;
-        
+        const origOnDrawForeground = nodeType.prototype.onDrawForeground;
+
+        // Node creation callback - works in both modes
         nodeType.prototype.onNodeCreated = function() {
             if (origOnNodeCreated) {
                 origOnNodeCreated.apply(this, arguments);
             }
+
+            // Initialize for Classic mode (will be overridden if Nodes 2.0)
             this.isEditMode = false;
+            this._promptPalette_drawCalled = false;
+            this._promptPalette_setupDone = false;
+
             const textWidget = findTextWidget(this);
             const separatorWidget = findSeparatorWidget(this);
             const newlineWidget = findNewlineWidget(this);
             const separatorNewlineWidget = findSeparatorNewlineWidget(this);
             const trailingSeparatorWidget = findTrailingSeparatorWidget(this);
+
             if (textWidget) {
+                // Hide widgets initially for Classic mode
                 textWidget.hidden = true;
-                if (separatorWidget) {
-                    separatorWidget.hidden = true;
-                }
-                if (newlineWidget) {
-                    newlineWidget.hidden = true;
-                }
-                if (separatorNewlineWidget) {
-                    separatorNewlineWidget.hidden = true;
-                }
-                if (trailingSeparatorWidget) {
-                    trailingSeparatorWidget.hidden = true;
-                }
+                if (separatorWidget) separatorWidget.hidden = true;
+                if (newlineWidget) newlineWidget.hidden = true;
+                if (separatorNewlineWidget) separatorNewlineWidget.hidden = true;
+                if (trailingSeparatorWidget) trailingSeparatorWidget.hidden = true;
+
+                // Set up Classic mode features
                 addEditButton(this, textWidget, app);
                 setupClickHandler(this, textWidget, app);
+
+                // Add Nodes 2.0 detection widget (will auto-hide in Classic mode after first draw)
+                this._promptPalette_nodes2Widget = this.addWidget(
+                    "text",
+                    "⚠️ Limited Support",
+                    "Advanced features require Classic mode.\nSwitch in ComfyUI settings.",
+                    () => {},
+                    {
+                        disabled: true,
+                        multiline: true,
+                        serialize: false
+                    }
+                );
+                // Initially hide this widget
+                this._promptPalette_nodes2Widget.hidden = true;
             }
         };
-    },
 
-    setupDrawForegroundCallback(nodeType, config, app) {
-        const origOnDrawForeground = nodeType.prototype.onDrawForeground;
-        
+        // Drawing callback - only works in Classic mode
         nodeType.prototype.onDrawForeground = function(ctx) {
             if (origOnDrawForeground) {
                 origOnDrawForeground.call(this, ctx);
             }
-            // Draw text when not in edit mode
+
             const textWidget = findTextWidget(this);
-            if (textWidget && !this.isEditMode) {
+            if (!textWidget) return;
+
+            // First draw call - detect mode
+            if (!this._promptPalette_setupDone) {
+                this._promptPalette_setupDone = true;
+                this._promptPalette_drawCalled = true;
+
+                // We're in Classic mode (onDrawForeground is being called)
+                console.log("[PromptPalette_F] Classic mode detected (onDrawForeground called)");
+                window.__PromptPalette_F_Mode = 'classic';
+
+                // Hide Nodes 2.0 warning widget
+                if (this._promptPalette_nodes2Widget) {
+                    this._promptPalette_nodes2Widget.hidden = true;
+                }
+
+                // Ensure Classic mode widgets are hidden
+                textWidget.hidden = true;
+                const separatorWidget = findSeparatorWidget(this);
+                if (separatorWidget) separatorWidget.hidden = true;
+                const newlineWidget = findNewlineWidget(this);
+                if (newlineWidget) newlineWidget.hidden = true;
+                const separatorNewlineWidget = findSeparatorNewlineWidget(this);
+                if (separatorNewlineWidget) separatorNewlineWidget.hidden = true;
+                const trailingSeparatorWidget = findTrailingSeparatorWidget(this);
+                if (trailingSeparatorWidget) trailingSeparatorWidget.hidden = true;
+            }
+
+            // After mode detection, if we're still being called, we're in Classic mode
+            if (!this._promptPalette_drawCalled) {
+                // Fallback to Nodes 2.0 mode
+                return;
+            }
+
+            // Draw Classic mode UI
+            if (!this.isEditMode) {
                 drawCheckboxList(this, ctx, textWidget.value, app);
             }
+        };
+
+        // Add a delayed check for Nodes 2.0 mode
+        // If onDrawForeground is never called, we're in Nodes 2.0
+        nodeType.prototype.onAdded = function() {
+            setTimeout(() => {
+                if (!this._promptPalette_setupDone) {
+                    // onDrawForeground was never called - we're in Nodes 2.0 mode
+                    console.log("[PromptPalette_F] Nodes 2.0 mode detected (onDrawForeground not called)");
+                    console.warn("[PromptPalette_F] Advanced features (preview, groups, weights, checkboxes) require Classic mode");
+                    window.__PromptPalette_F_Mode = 'nodes2';
+
+                    // Show Nodes 2.0 warning widget
+                    if (this._promptPalette_nodes2Widget) {
+                        this._promptPalette_nodes2Widget.hidden = false;
+                    }
+
+                    // Show all input widgets for Nodes 2.0 mode
+                    const textWidget = findTextWidget(this);
+                    if (textWidget) textWidget.hidden = false;
+                    const separatorWidget = findSeparatorWidget(this);
+                    if (separatorWidget) separatorWidget.hidden = false;
+                    const newlineWidget = findNewlineWidget(this);
+                    if (newlineWidget) newlineWidget.hidden = false;
+                    const separatorNewlineWidget = findSeparatorNewlineWidget(this);
+                    if (separatorNewlineWidget) separatorNewlineWidget.hidden = false;
+                    const trailingSeparatorWidget = findTrailingSeparatorWidget(this);
+                    if (trailingSeparatorWidget) trailingSeparatorWidget.hidden = false;
+                }
+            }, 100); // 100ms delay to allow onDrawForeground to be called
         };
     }
 });
@@ -1329,12 +1410,12 @@ function drawScrollButton(ctx, x, y, width, height, symbol, colors) {
     // Draw button background
     ctx.fillStyle = "#3a3a3a"; // Dark gray background for buttons
     ctx.fillRect(x, y, width, height);
-    
+
     // Draw button border
     ctx.strokeStyle = colors.borderColor;
     ctx.lineWidth = 1;
     ctx.strokeRect(x, y, width, height);
-    
+
     // Draw symbol
     ctx.fillStyle = colors.defaultTextColor;
     ctx.font = `${height - 4}px monospace`;

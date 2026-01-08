@@ -1,15 +1,71 @@
 import os
 import re
 
+# Try V3 API imports (optional)
+try:
+    from comfy_api.latest import io, ComfyExtension
+    V3_AVAILABLE = True
+except ImportError:
+    V3_AVAILABLE = False
+    # Dummy classes for V1 compatibility
+    class ComfyNode:
+        pass
 
-class PromptPalette_F:
+# Define base class based on API availability
+if V3_AVAILABLE:
+    BaseNodeClass = io.ComfyNode
+else:
+    BaseNodeClass = object
+
+
+class PromptPalette_F(BaseNodeClass):
+    # V3 API Schema (only if V3 is available)
+    if V3_AVAILABLE:
+        @classmethod
+        def define_schema(cls):
+            return io.Schema(
+                node_id="PromptPalette_F",
+                display_name="PromptPalette-F",
+                category="utils",
+                inputs=[
+                    io.String.Input(
+                        "text",
+                        default="",
+                        multiline=True
+                    ),
+                    io.String.Input(
+                        "prefix",
+                        optional=True,
+                        force_input=True
+                    ),
+                    io.String.Input(
+                        "separator",
+                        default=", "
+                    ),
+                    io.Boolean.Input(
+                        "trailing_separator",
+                        default=False
+                    ),
+                    io.Boolean.Input(
+                        "separator_newline",
+                        default=False
+                    ),
+                    io.Boolean.Input(
+                        "add_newline",
+                        default=False
+                    ),
+                ],
+                outputs=[io.String.Output()]
+            )
+
+    # V1 API INPUT_TYPES (always available)
     @classmethod
-    def INPUT_TYPES(s):
+    def INPUT_TYPES(cls):
         return {
             "required": {
                 "text": (
                     "STRING",
-                    {"default": "", "multiline": True, "rows": 8},
+                    {"default": "", "multiline": True},
                 )
             },
             "optional": {
@@ -22,10 +78,11 @@ class PromptPalette_F:
         }
 
     RETURN_TYPES = ("STRING",)
-    FUNCTION = "process"
+    FUNCTION = "execute"
     CATEGORY = "utils"
 
-    def remove_group_tags_with_escape(self, line):
+    @staticmethod
+    def remove_group_tags_with_escape(line):
         """Remove group tags [group] while preserving escaped brackets \[ \]"""
         # 1. Replace escaped brackets with placeholders
         line = line.replace(r'\[', '___ESC_OPEN___')
@@ -40,7 +97,9 @@ class PromptPalette_F:
 
         return line.strip()
 
-    def process(self, text, prefix=None, separator=", ", add_newline=False, separator_newline=False, trailing_separator=False):
+    @classmethod
+    def execute(cls, text, prefix=None, separator=", ", add_newline=False,
+                separator_newline=False, trailing_separator=False) -> io.NodeOutput:
         lines = text.split("\n")
         filtered_lines = []
         for line in lines:
@@ -54,10 +113,10 @@ class PromptPalette_F:
             if "//" in line:
                 line = line.split("//")[0].rstrip()
             # Remove group tags [group] from line with escape support
-            line = self.remove_group_tags_with_escape(line)
+            line = cls.remove_group_tags_with_escape(line)
             if line:  # Only add non-empty lines after tag removal
                 filtered_lines.append(line)
-        
+
         # Join with custom separator
         if separator == "":
             # No separator, no newlines
@@ -87,9 +146,28 @@ class PromptPalette_F:
         if add_newline:
             result += "\n"
 
-        return (result,)
+        # Return format depends on API version
+        if V3_AVAILABLE:
+            return io.NodeOutput(result)
+        else:
+            return (result,)
 
 
+# V3 Extension entrypoint (only if V3 is available)
+if V3_AVAILABLE:
+    class PromptPaletteExtension(ComfyExtension):
+        @property
+        def web_directory(self):
+            return os.path.join(os.path.dirname(os.path.realpath(__file__)), "web")
+
+        async def get_node_list(self):
+            return [PromptPalette_F]
+
+    async def comfy_entrypoint():
+        return PromptPaletteExtension()
+
+
+# Legacy V1 exports for backward compatibility
 NODE_CLASS_MAPPINGS = {"PromptPalette_F": PromptPalette_F}
 NODE_DISPLAY_NAME_MAPPINGS = {"PromptPalette_F": "PromptPalette-F"}
 WEB_DIRECTORY = os.path.join(os.path.dirname(os.path.realpath(__file__)), "web")
