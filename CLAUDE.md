@@ -71,17 +71,25 @@ The project follows ComfyUI's custom node structure with V3 API compliance and d
    - **V3 Extension** (lines 157-167): Only defined if V3 API available, exported via `comfy_entrypoint()` async function
 
 2. **Web Extension - Adaptive Dual Mode** (`web/index.js`):
-   - **Single Unified Registration** (lines 149-246): Single extension "PromptPalette_F" that adapts to rendering mode
+   - **Single Unified Registration**: Single extension "PromptPalette_F" that adapts to rendering mode
    - **Adaptive Mode Detection via Callbacks**:
-     - `onNodeCreated` (lines 159-206): Sets up both Classic and Nodes 2.0 features initially
+     - `onNodeCreated`: Sets up both Classic and Nodes 2.0 features initially
        - Initializes `_promptPalette_drawCalled` and `_promptPalette_setupDone` flags
-       - Creates all Classic mode widgets (hidden initially)
-       - Creates Nodes 2.0 warning widget (hidden initially)
-     - `onDrawForeground` (lines 208-230): Canvas rendering callback - ONLY invoked in Classic mode
-       - When called: Marks as Classic mode, hides Nodes 2.0 warning
+       - Stores reference to text widget for later button creation
+       - Creates 3 Nodes 2.0 warning widgets (hidden initially):
+         - "⚠️ Nodes 2.0 Mode" (status indicator)
+         - "Use // to toggle lines" (usage instruction)
+         - "Switch to Classic for full UI" (feature availability)
+     - `onDrawForeground`: Canvas rendering callback - ONLY invoked in Classic mode
+       - Sets `_promptPalette_foregroundDrawnThisFrame` flag for mode detection
+       - When called first time: Creates Edit/Hide Preview buttons, marks as Classic mode
        - Performs custom canvas drawing for checkboxes, groups, weights, preview
-     - `onAdded` (lines 232-244): Delayed detection with 100ms timeout
-       - If `onDrawForeground` wasn't called: Marks as Nodes 2.0 mode, shows warning widget
+     - `onDrawBackground`: Background rendering callback - works in both modes
+       - Checks `_promptPalette_foregroundDrawnThisFrame` flag to detect current mode
+       - Dynamically shows/hides warning widgets based on mode
+       - Note: Button visibility control doesn't work without page reload
+     - `onAdded`: Delayed detection with 100ms timeout (fallback for initial detection)
+       - If `onDrawForeground` wasn't called: Marks as Nodes 2.0 mode, shows warning widgets
        - Makes all input widgets visible (no custom edit mode in Nodes 2.0)
    - **Why Adaptive Detection**:
      - `app.vueAppReady` is `true` in both Classic and Nodes 2.0 modes (unreliable)
@@ -279,20 +287,24 @@ This project requires no build process or package management - it's a pure Comfy
 
 ## Code Organization
 
-### web/index.js Structure (1,444 lines):
-- **Configuration**: Lines 3-26 (CONFIG object with UI constants, including widgetSpacing)
-- **Group Parsing Functions**: Lines 28-147 (group tag extraction, status tracking, simplified toggle logic, global toggles)
-- **Unified Extension Registration**: Lines 149-246 (Single "PromptPalette_F" extension with adaptive mode detection)
-  - Lines 159-206: `onNodeCreated` callback - initializes both mode's features
-  - Lines 208-230: `onDrawForeground` callback - marks Classic mode when invoked
-  - Lines 232-244: `onAdded` callback - detects Nodes 2.0 mode if drawing didn't occur
-- **UI Control Functions**: Lines 248-535 (widget management, click handling, interaction) - Classic mode only
-- **Text Wrapping Utilities**: Lines 537-587 (dynamic widget height calculation, text wrapping, width calculation)
-- **Drawing Functions**: Lines 589-1086 (canvas rendering, checkboxes, phrases, group controls, weight buttons, clickable text areas) - Classic mode only
-- **Weight System**: Lines 1088-1143 (parsing, adjustment, formatting)
-- **Theme/Color System**: Lines 1145-1188 (dynamic theme integration, color caching)
-- **Preview System**: Lines 1190-1434 (preview generation, rendering, scrolling) - Classic mode only
-- **Entry Point**: Lines 1436-1444 (extension registration)
+### web/index.js Structure (approx. 1,500+ lines):
+- **Configuration**: CONFIG object with UI constants, including widgetSpacing
+- **Group Parsing Functions**: Group tag extraction, status tracking, simplified toggle logic, global toggles
+- **Unified Extension Registration**: Single "PromptPalette_F" extension with adaptive mode detection
+  - `setupAdaptiveMode()`: Main setup function
+  - `onNodeCreated`: Initializes widgets for both modes, creates 3 warning widgets for Nodes 2.0
+  - `onDrawForeground`: Canvas rendering callback (Classic mode only) - creates buttons, draws UI
+  - `onDrawBackground`: Background rendering callback (both modes) - dynamic mode detection and widget visibility control
+  - `onAdded`: Delayed detection with 100ms timeout (fallback for initial Nodes 2.0 detection)
+- **UI Control Functions**: Widget management, click handling, interaction (Classic mode only)
+  - `addEditButton()`: Creates Edit and Hide Preview buttons (called in Classic mode only)
+  - Button creation, text widget handling, separator controls
+- **Text Wrapping Utilities**: Dynamic widget height calculation, text wrapping, width calculation
+- **Drawing Functions**: Canvas rendering for checkboxes, phrases, group controls, weight buttons, clickable text areas (Classic mode only)
+- **Weight System**: Parsing, adjustment, formatting for `(text:weight)` notation
+- **Theme/Color System**: Dynamic theme integration, color caching
+- **Preview System**: Preview generation, rendering, scrolling (Classic mode only)
+- **Entry Point**: Extension registration
 
 ### nodes.py Structure (175 lines):
 - **V3 API Conditional Imports**: Lines 4-12 (try/except block for comfy_api.latest imports, V3_AVAILABLE flag, dummy ComfyNode class)
@@ -329,6 +341,16 @@ This project includes `pyproject.toml` for ComfyUI registry publication followin
 
 ## Development Status
 
+### Recent Changes (January 10, 2026)
+- ⚠️ **Nodes 2.0 button visibility**: Attempted to hide Classic mode buttons (Edit, Hide Preview) when switching to Nodes 2.0 mode without page reload
+  - Multiple approaches tried (hidden property, computeSize, dynamic deletion)
+  - Issue: Button widgets don't respond to visibility changes in Vue.js rendering without reload
+  - Decision: Accepted as limitation - users must reload page when switching modes
+- ✅ **Warning display improvements**: Split single multiline widget into 3 separate widgets
+  - Better readability in Nodes 2.0 mode
+  - Clear instructions for using `//` comment syntax
+  - Directs users to Classic mode for full features
+
 ### V3 API Migration (v2.0.0) - January 2026
 - ✅ **V3 backend**: Complete with conditional V3/V1 hybrid approach
   - V3 API support when available (ComfyNode inheritance, define_schema, execute, io.NodeOutput)
@@ -357,8 +379,11 @@ This project includes `pyproject.toml` for ComfyUI registry publication followin
   - Fixes issue where `app.vueAppReady` is true in both modes
 - ✅ **Text editing**: All input widgets visible and functional
 - ✅ **Backend processing**: Full text processing (same as Classic mode)
-- ✅ **Warning display**: Shows limitation notice to users
-- ⚠️ **Warning text wrapping**: Known issue - warning text doesn't wrap properly
+- ✅ **Warning display**: Shows limitation notice to users (3 separate widgets)
+  - "⚠️ Nodes 2.0 Mode"
+  - "Use // to toggle lines" (explains comment-based toggling)
+  - "Switch to Classic for full UI" (directs users to full features)
+- ⚠️ **Visual issues**: Edit/Hide Preview buttons remain visible (non-functional), empty text fields appear
 - ❌ **Advanced features**: Not available (Phase 2B - waiting for ComfyUI Vue API documentation)
   - Interactive checkboxes
   - Weight adjustment controls
@@ -376,13 +401,18 @@ This project includes `pyproject.toml` for ComfyUI registry publication followin
 - **Status**: Under investigation, may be ComfyUI core issue
 - **Code Location**: `__init__.py:1-5`, `nodes.py:157-173`
 
-### Warning Widget Text Wrapping in Nodes 2.0 Mode (Ongoing)
-- **Issue**: Warning widget text in Nodes 2.0 mode doesn't wrap, requires wide window to read
-- **Current Text**: "⚠️ Limited Support" / "Advanced features require Classic mode.\nSwitch in ComfyUI settings."
-- **Attempted Fix**: Changed from long single-line text to shorter multi-line text (not effective)
-- **Impact**: Minor UX issue - warning message difficult to read in narrow windows
-- **Status**: Needs further investigation into ComfyUI widget text wrapping behavior
-- **Code Location**: `web/index.js:198-208`
+### Warning Widget Text Wrapping in Nodes 2.0 Mode (Partially Resolved)
+- **Issue**: Single multiline text widget doesn't wrap text properly in Nodes 2.0 mode
+- **Original Text**: "⚠️ Limited Support" / "Advanced features require Classic mode.\nSwitch in ComfyUI settings."
+- **Attempted Fix 1**: Changed to shorter multi-line text (not effective - newlines ignored)
+- **Attempted Fix 2**: Split into 3 separate text widgets (partially effective)
+  - Widget 1: "⚠️ Nodes 2.0 Mode"
+  - Widget 2: "Use // to toggle lines"
+  - Widget 3: "Switch to Classic for full UI"
+- **Remaining Issue**: Empty text fields appear alongside the warning widgets
+- **Impact**: Minor UX issue - warning message now readable but with extra visual clutter
+- **Status**: Acceptable workaround implemented, further improvements possible
+- **Code Location**: `web/index.js:201-233`
 
 ### Mode Detection Reliability (Partially Resolved)
 - **Issue**: Traditional mode detection methods are unreliable
@@ -395,6 +425,23 @@ This project includes `pyproject.toml` for ComfyUI registry publication followin
   - Nodes 2.0 mode: `onDrawForeground` is never called by Vue.js rendering system
 - **Status**: ✅ Working correctly with adaptive detection
 - **Code Location**: `web/index.js:159-244`
+
+### Classic Mode Button Visibility in Nodes 2.0 Mode (Unresolved)
+- **Issue**: Edit and Hide Preview buttons remain visible when switching from Classic to Nodes 2.0 mode without page reload
+- **Context**: ComfyUI allows dynamic mode switching without page reload (layer switching, not full reload)
+- **Root Cause**: Button widgets' `hidden` property doesn't work properly in Nodes 2.0 mode (unlike text widgets)
+- **Attempted Solutions**:
+  1. Setting `widget.hidden = true` - doesn't hide button widgets
+  2. Using `computeSize()` to return `[0, 0]` - not invoked dynamically
+  3. Removing from `node.widgets` array in `onDrawBackground` - doesn't update UI without reload
+  4. Dynamic creation/deletion in `onDrawBackground` - doesn't update UI without reload
+- **Current Behavior**:
+  - With page reload: Buttons correctly hidden/shown based on mode ✅
+  - Without page reload: Buttons from previous mode remain visible ❌
+- **Impact**: Minor UX issue - buttons are visible but non-functional in Nodes 2.0 mode
+- **Decision**: Issue accepted as limitation of Vue.js rendering system
+- **Status**: Will not fix - workaround requires page reload
+- **Code Location**: `web/index.js:314-373` (attempted `onDrawBackground` solution)
 
 ## Fixed Issues
 
@@ -474,9 +521,15 @@ This project includes `pyproject.toml` for ComfyUI registry publication followin
   - ⚠️ Edit/display mode toggling
 
 **User Guidance:**
-- Node displays warning widget in Nodes 2.0 mode: "Advanced features (preview, groups, weights, checkboxes) are only available in Classic mode"
+- Node displays 3 warning widgets in Nodes 2.0 mode:
+  - "⚠️ Nodes 2.0 Mode" (status indicator)
+  - "Use // to toggle lines" (explains comment-based phrase toggling)
+  - "Switch to Classic for full UI" (directs to full feature set)
 - Users can toggle between Classic and Nodes 2.0 modes in ComfyUI settings
-- Mode selection automatically detected on startup and logged to console
+- **Important**: After switching modes, reload the page for proper UI update
+  - Without reload: Buttons from previous mode may remain visible (but non-functional)
+  - With reload: UI correctly reflects current mode
+- Mode selection automatically detected and logged to console
 
 ### Mode Detection Strategy
 
@@ -488,16 +541,24 @@ The extension uses an **adaptive detection approach** that determines the render
 1. **Node Creation** (`onNodeCreated`): Sets up features for both modes initially
    - Creates all widgets (hidden by default)
    - Initializes detection flags: `_promptPalette_drawCalled`, `_promptPalette_setupDone`
-   - Both Classic and Nodes 2.0 widgets are prepared
+   - Creates 3 warning widgets for Nodes 2.0 mode
+   - Stores text widget reference for later button creation
 
 2. **Canvas Drawing** (`onDrawForeground`): Only invoked in Classic mode
-   - If called → Marks as Classic mode, enables canvas rendering
-   - Hides Nodes 2.0 warning widget
+   - Sets `_promptPalette_foregroundDrawnThisFrame` flag
+   - If called first time → Creates Edit/Hide Preview buttons, marks as Classic mode
+   - Hides Nodes 2.0 warning widgets
+   - Performs custom canvas drawing
    - Sets `window.__PromptPalette_F_Mode = 'classic'`
 
-3. **Delayed Detection** (`onAdded`): Checks after 100ms timeout
+3. **Background Drawing** (`onDrawBackground`): Invoked in both modes (attempted dynamic mode switching)
+   - Checks `_promptPalette_foregroundDrawnThisFrame` flag to detect current mode
+   - Shows/hides warning widgets based on mode
+   - Note: Button visibility control doesn't work without page reload (Vue.js limitation)
+
+4. **Delayed Detection** (`onAdded`): Checks after 100ms timeout (fallback for initial detection)
    - If `onDrawForeground` wasn't called → Marks as Nodes 2.0 mode
-   - Shows warning widget, makes input widgets visible
+   - Shows warning widgets, makes input widgets visible
    - Sets `window.__PromptPalette_F_Mode = 'nodes2'`
 
 **Why Adaptive Detection**:

@@ -164,6 +164,7 @@ app.registerExtension({
     setupAdaptiveMode(nodeType, config, app) {
         const origOnNodeCreated = nodeType.prototype.onNodeCreated;
         const origOnDrawForeground = nodeType.prototype.onDrawForeground;
+        const origOnDrawBackground = nodeType.prototype.onDrawBackground;
 
         // Node creation callback - works in both modes
         nodeType.prototype.onNodeCreated = function() {
@@ -175,6 +176,7 @@ app.registerExtension({
             this.isEditMode = false;
             this._promptPalette_drawCalled = false;
             this._promptPalette_setupDone = false;
+            this._promptPalette_modeDetectionTimeout = null;
 
             const textWidget = findTextWidget(this);
             const separatorWidget = findSeparatorWidget(this);
@@ -190,29 +192,59 @@ app.registerExtension({
                 if (separatorNewlineWidget) separatorNewlineWidget.hidden = true;
                 if (trailingSeparatorWidget) trailingSeparatorWidget.hidden = true;
 
-                // Set up Classic mode features
-                addEditButton(this, textWidget, app);
+                // Store reference to textWidget for later use
+                this._promptPalette_textWidget = textWidget;
+
+                // Set up click handler (needed for both modes)
                 setupClickHandler(this, textWidget, app);
 
-                // Add Nodes 2.0 detection widget (will auto-hide in Classic mode after first draw)
+                // Add Nodes 2.0 detection widgets (will auto-hide in Classic mode after first draw)
                 this._promptPalette_nodes2Widget = this.addWidget(
                     "text",
-                    "⚠️ Limited Support",
-                    "Advanced features require Classic mode.\nSwitch in ComfyUI settings.",
+                    "⚠️ Nodes 2.0 Mode",
+                    "",
                     () => {},
                     {
                         disabled: true,
-                        multiline: true,
                         serialize: false
                     }
                 );
-                // Initially hide this widget
                 this._promptPalette_nodes2Widget.hidden = true;
+
+                this._promptPalette_nodes2HelpWidget1 = this.addWidget(
+                    "text",
+                    "Use // to toggle lines",
+                    "",
+                    () => {},
+                    {
+                        disabled: true,
+                        serialize: false
+                    }
+                );
+                this._promptPalette_nodes2HelpWidget1.hidden = true;
+
+                this._promptPalette_nodes2HelpWidget2 = this.addWidget(
+                    "text",
+                    "Switch to Classic for full UI",
+                    "",
+                    () => {},
+                    {
+                        disabled: true,
+                        serialize: false
+                    }
+                );
+                this._promptPalette_nodes2HelpWidget2.hidden = true;
+
+                // Buttons will be created later when mode is detected
             }
         };
 
         // Drawing callback - only works in Classic mode
         nodeType.prototype.onDrawForeground = function(ctx) {
+            // Set flag to indicate onDrawForeground was called in this frame
+            // This is used by onDrawBackground to detect Classic mode dynamically
+            this._promptPalette_foregroundDrawnThisFrame = true;
+
             if (origOnDrawForeground) {
                 origOnDrawForeground.call(this, ctx);
             }
@@ -225,13 +257,30 @@ app.registerExtension({
                 this._promptPalette_setupDone = true;
                 this._promptPalette_drawCalled = true;
 
+                // Cancel Nodes 2.0 detection timeout
+                if (this._promptPalette_modeDetectionTimeout) {
+                    clearTimeout(this._promptPalette_modeDetectionTimeout);
+                    this._promptPalette_modeDetectionTimeout = null;
+                }
+
                 // We're in Classic mode (onDrawForeground is being called)
                 console.log("[PromptPalette_F] Classic mode detected (onDrawForeground called)");
                 window.__PromptPalette_F_Mode = 'classic';
 
-                // Hide Nodes 2.0 warning widget
+                // Create Classic mode buttons now that we've detected Classic mode
+                if (this._promptPalette_textWidget && !this._promptPalette_editButton) {
+                    addEditButton(this, this._promptPalette_textWidget, app);
+                }
+
+                // Hide Nodes 2.0 warning widgets
                 if (this._promptPalette_nodes2Widget) {
                     this._promptPalette_nodes2Widget.hidden = true;
+                }
+                if (this._promptPalette_nodes2HelpWidget1) {
+                    this._promptPalette_nodes2HelpWidget1.hidden = true;
+                }
+                if (this._promptPalette_nodes2HelpWidget2) {
+                    this._promptPalette_nodes2HelpWidget2.hidden = true;
                 }
 
                 // Ensure Classic mode widgets are hidden
@@ -244,6 +293,9 @@ app.registerExtension({
                 if (separatorNewlineWidget) separatorNewlineWidget.hidden = true;
                 const trailingSeparatorWidget = findTrailingSeparatorWidget(this);
                 if (trailingSeparatorWidget) trailingSeparatorWidget.hidden = true;
+
+                // Force node size recalculation to show buttons
+                this.setSize(this.computeSize());
             }
 
             // After mode detection, if we're still being called, we're in Classic mode
@@ -258,19 +310,99 @@ app.registerExtension({
             }
         };
 
+        // Background drawing callback - works in both modes
+        // Use this to dynamically control button visibility based on current mode
+        nodeType.prototype.onDrawBackground = function(ctx) {
+            if (origOnDrawBackground) {
+                origOnDrawBackground.call(this, ctx);
+            }
+
+            // Check if onDrawForeground was called in this frame
+            // If it was called, we're in Classic mode; if not, we're in Nodes 2.0 mode
+            const isCurrentlyClassicMode = this._promptPalette_foregroundDrawnThisFrame || false;
+
+            // Reset the flag for next frame
+            this._promptPalette_foregroundDrawnThisFrame = false;
+
+            // Handle mode switching dynamically
+            if (isCurrentlyClassicMode) {
+                // Classic mode: Create buttons if they don't exist
+                if (!this._promptPalette_editButton && this._promptPalette_textWidget) {
+                    addEditButton(this, this._promptPalette_textWidget, app);
+                    // Force node size recalculation after adding buttons
+                    this.setSize(this.computeSize());
+                }
+                // Hide warning widgets
+                if (this._promptPalette_nodes2Widget) {
+                    this._promptPalette_nodes2Widget.hidden = true;
+                }
+                if (this._promptPalette_nodes2HelpWidget1) {
+                    this._promptPalette_nodes2HelpWidget1.hidden = true;
+                }
+                if (this._promptPalette_nodes2HelpWidget2) {
+                    this._promptPalette_nodes2HelpWidget2.hidden = true;
+                }
+            } else {
+                // Nodes 2.0 mode: Remove buttons if they exist
+                if (this._promptPalette_editButton || this._promptPalette_previewButton) {
+                    if (this.widgets) {
+                        this.widgets = this.widgets.filter(w => {
+                            return w !== this._promptPalette_editButton &&
+                                   w !== this._promptPalette_previewButton &&
+                                   w !== this._promptPalette_spacer;
+                        });
+                    }
+                    this._promptPalette_editButton = null;
+                    this._promptPalette_previewButton = null;
+                    this._promptPalette_spacer = null;
+                    // Force node size recalculation after removing buttons
+                    this.setSize(this.computeSize());
+                }
+                // Show warning widgets
+                if (this._promptPalette_nodes2Widget) {
+                    this._promptPalette_nodes2Widget.hidden = false;
+                }
+                if (this._promptPalette_nodes2HelpWidget1) {
+                    this._promptPalette_nodes2HelpWidget1.hidden = false;
+                }
+                if (this._promptPalette_nodes2HelpWidget2) {
+                    this._promptPalette_nodes2HelpWidget2.hidden = false;
+                }
+            }
+        };
+
         // Add a delayed check for Nodes 2.0 mode
         // If onDrawForeground is never called, we're in Nodes 2.0
         nodeType.prototype.onAdded = function() {
-            setTimeout(() => {
+            this._promptPalette_modeDetectionTimeout = setTimeout(() => {
                 if (!this._promptPalette_setupDone) {
                     // onDrawForeground was never called - we're in Nodes 2.0 mode
                     console.log("[PromptPalette_F] Nodes 2.0 mode detected (onDrawForeground not called)");
                     console.warn("[PromptPalette_F] Advanced features (preview, groups, weights, checkboxes) require Classic mode");
                     window.__PromptPalette_F_Mode = 'nodes2';
 
-                    // Show Nodes 2.0 warning widget
+                    // Remove Classic mode buttons if they exist (from previous Classic mode session)
+                    if (this.widgets && (this._promptPalette_editButton || this._promptPalette_previewButton)) {
+                        this.widgets = this.widgets.filter(w => {
+                            return w !== this._promptPalette_editButton &&
+                                   w !== this._promptPalette_previewButton &&
+                                   w !== this._promptPalette_spacer;
+                        });
+                        // Clear the references
+                        this._promptPalette_editButton = null;
+                        this._promptPalette_previewButton = null;
+                        this._promptPalette_spacer = null;
+                    }
+
+                    // Show Nodes 2.0 warning widgets
                     if (this._promptPalette_nodes2Widget) {
                         this._promptPalette_nodes2Widget.hidden = false;
+                    }
+                    if (this._promptPalette_nodes2HelpWidget1) {
+                        this._promptPalette_nodes2HelpWidget1.hidden = false;
+                    }
+                    if (this._promptPalette_nodes2HelpWidget2) {
+                        this._promptPalette_nodes2HelpWidget2.hidden = false;
                     }
 
                     // Show all input widgets for Nodes 2.0 mode
@@ -284,6 +416,12 @@ app.registerExtension({
                     if (separatorNewlineWidget) separatorNewlineWidget.hidden = false;
                     const trailingSeparatorWidget = findTrailingSeparatorWidget(this);
                     if (trailingSeparatorWidget) trailingSeparatorWidget.hidden = false;
+
+                    // Force node size recalculation
+                    this.setSize(this.computeSize());
+                    if (app.graph) {
+                        app.graph.setDirtyCanvas(true, true);
+                    }
                 }
             }, 100); // 100ms delay to allow onDrawForeground to be called
         };
@@ -345,6 +483,7 @@ function findTrailingSeparatorWidget(node) {
 }
 
 function addEditButton(node, textWidget, app) {
+    // This function is only called in Classic mode, so no mode checking needed
     const textButton = node.addWidget("button", "Edit", "edit_text", () => {
         node.isEditMode = !node.isEditMode;
         textWidget.hidden = !node.isEditMode;
@@ -367,7 +506,7 @@ function addEditButton(node, textWidget, app) {
         textButton.name = node.isEditMode ? "Save" : "Edit";
         app.graph.setDirtyCanvas(true); // Redraw canvas
     });
-    
+
     // Add preview toggle button
     const previewButton = node.addWidget("button", "Hide Preview", "toggle_preview", () => {
         node.hidePreview = !node.hidePreview;
@@ -375,18 +514,23 @@ function addEditButton(node, textWidget, app) {
         // Trigger node size recalculation
         app.graph.setDirtyCanvas(true);
     });
-    
+
     // Initialize preview toggle state
     node.hidePreview = false;
-    
+
     // Initialize scroll state for preview
     node.previewScrollOffset = 0;
     node.lastPreviewText = "";
-    
+
     // Add spacing below buttons
     const spacer = node.addWidget("text", "", "");
     spacer.hidden = true;
     spacer.computeSize = () => [0, 6];
+
+    // Store references to Classic mode buttons
+    node._promptPalette_editButton = textButton;
+    node._promptPalette_previewButton = previewButton;
+    node._promptPalette_spacer = spacer;
 }
 
 function setupClickHandler(node, textWidget, app) {
