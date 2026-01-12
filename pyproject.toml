@@ -1,11 +1,14 @@
 [project]
 name = "promptpalette-f"
 version = "2.0.0"
-description = "An interactive prompt editing interface with checkbox-based phrase toggling, weight adjustment controls, and group management for ComfyUI. V3 API compliant with Nodes 2.0 basic support."
+description = "An interactive prompt editing interface with checkbox-based phrase toggling for ComfyUI."
+readme = "README.md"
 license = { file = "LICENSE" }
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 classifiers = [
     "Operating System :: OS Independent"
+]
+dependencies = [
 ]
 
 [project.urls]
@@ -14,3 +17,7 @@ Repository = "https://github.com/id-fa/ComfyUI-PromptPalette-F"
 [tool.comfy]
 PublisherId = "id-fa"
 DisplayName = "PromptPalette-F"
+Icon = ""
+Tags = []
+Repository = "https://github.com/id-fa/ComfyUI-PromptPalette-F"
+includes = []
