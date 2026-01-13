@@ -4,6 +4,37 @@
 
 ![Example](examples/example-alt01.png)
 
+## 🎉 New: Dual UI Implementation
+
+PromptPalette-Fは**2つのノード**を提供します（どちらもClassic modeで動作）：
+
+| ノード | UI実装 | 特徴 |
+|--------|--------|------|
+| **PromptPalette-F** | Canvas描画 | 従来のCanvas API、軽量 |
+| **PromptPalette-F (Vue)** | Vue.js | モダンなVue components |
+
+**どちらも同じ機能を提供** - UI実装の好みで選択できます！
+
+**注意**: 両ノードとも**Classic mode（LiteGraph）専用**です。ComfyUIのNodes 2.0モードでは、カスタムVue widget APIが未公開のため、PromptPalette-F (Vue)は動作しません。Classic modeで使用してください。
+
+📖 **詳細な開発ガイド**: [VUE_IMPLEMENTATION.md](VUE_IMPLEMENTATION.md) を参照
+
+### Vue実装の開発セットアップ
+
+Vue.js版を開発・カスタマイズする場合：
+
+```bash
+# 1. 依存関係のインストール
+npm install
+
+# 2. Vueコンポーネントのビルド
+npm run build
+
+# 3. ComfyUIを再起動
+```
+
+ビルド後、`web/vue-main.js` が生成され、**PromptPalette-F (Vue)** ノードで使用されます。
+
 ## 機能
 
 - **フレーズの切り替え** - チェックボックスでのON/OFF切り替え
@@ -76,6 +107,37 @@ model \[v2.1\] settings [model21]
 A custom node for ComfyUI that makes prompt editing easier by allowing phrase switching with just mouse operations
 
 ![Example](examples/example-alt01.png)
+
+## 🎉 New: Dual UI Implementation
+
+PromptPalette-F now provides **two nodes** (both work in Classic mode):
+
+| Node | UI Implementation | Features |
+|------|-------------------|----------|
+| **PromptPalette-F** | Canvas-based | Traditional Canvas API, lightweight |
+| **PromptPalette-F (Vue)** | Vue.js-based | Modern Vue components |
+
+**Both provide the same functionality** - choose based on UI implementation preference!
+
+**Note**: Both nodes work in **Classic mode (LiteGraph) only**. In ComfyUI's Nodes 2.0 mode, PromptPalette-F (Vue) does not work because the custom Vue widget API is not yet publicly available. Please use Classic mode.
+
+📖 **Detailed Developer Guide**: See [VUE_IMPLEMENTATION.md](VUE_IMPLEMENTATION.md)
+
+### Vue Implementation Development Setup
+
+To develop/customize the Vue.js version:
+
+```bash
+# 1. Install dependencies
+npm install
+
+# 2. Build Vue components
+npm run build
+
+# 3. Restart ComfyUI
+```
+
+After building, `web/vue-main.js` is generated and used by the **PromptPalette-F (Vue)** node.
 
 ## Features
 
