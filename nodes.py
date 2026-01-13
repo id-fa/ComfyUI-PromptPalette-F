@@ -14,11 +14,15 @@ except ImportError:
 # Define base class based on API availability
 if V3_AVAILABLE:
     BaseNodeClass = io.ComfyNode
+    BaseNodeClassV1Only = object  # For nodes that don't support V3
 else:
     BaseNodeClass = object
+    BaseNodeClassV1Only = object
 
 
 class PromptPalette_F(BaseNodeClass):
+    """Classic mode PromptPalette-F node with canvas-based UI"""
+
     # V3 API Schema (only if V3 is available)
     if V3_AVAILABLE:
         @classmethod
@@ -99,7 +103,7 @@ class PromptPalette_F(BaseNodeClass):
 
     @classmethod
     def execute(cls, text, prefix=None, separator=", ", add_newline=False,
-                separator_newline=False, trailing_separator=False) -> io.NodeOutput:
+                separator_newline=False, trailing_separator=False):
         lines = text.split("\n")
         filtered_lines = []
         for line in lines:
@@ -153,6 +157,68 @@ class PromptPalette_F(BaseNodeClass):
             return (result,)
 
 
+class PromptPalette_F_Vue(BaseNodeClassV1Only):
+    """Nodes 2.0 PromptPalette-F node with Vue.js-based UI"""
+
+    # This node uses V1 API only (not V3) because custom widget types
+    # are not well supported in V3 API's define_schema()
+
+    # V1 API INPUT_TYPES (always available)
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "prompt_palette_data": ("PROMPT_PALETTE_VUE", {}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    FUNCTION = "execute"
+    CATEGORY = "utils"
+    OUTPUT_NODE = False
+
+    @classmethod
+    def execute(cls, prompt_palette_data):
+        """Execute with data from Vue widget"""
+        # Debug: Log received data
+        print(f"[PromptPalette_F_Vue] execute called")
+        print(f"[PromptPalette_F_Vue] Received data type: {type(prompt_palette_data)}")
+        print(f"[PromptPalette_F_Vue] Received data: {prompt_palette_data}")
+
+        # Extract data from Vue widget
+        if isinstance(prompt_palette_data, dict):
+            text = prompt_palette_data.get("text", "")
+            separator = prompt_palette_data.get("separator", ", ")
+            print(f"[PromptPalette_F_Vue] Extracted text (first 50 chars): {text[:50]}")
+            print(f"[PromptPalette_F_Vue] Extracted separator: '{separator}'")
+        else:
+            # Fallback for simple string input
+            text = str(prompt_palette_data)
+            separator = ", "
+            print(f"[PromptPalette_F_Vue] Using fallback string: {text[:50]}")
+
+        # Process text
+        lines = text.split("\n")
+        filtered_lines = []
+        for line in lines:
+            if not line.strip():
+                continue
+            if line.strip().startswith("//") or line.strip().startswith("#"):
+                continue
+            if "//" in line:
+                line = line.split("//")[0].rstrip()
+            line = PromptPalette_F.remove_group_tags_with_escape(line)
+            if line:
+                filtered_lines.append(line)
+
+        result = separator.join(filtered_lines)
+
+        if V3_AVAILABLE:
+            return io.NodeOutput(result)
+        else:
+            return (result,)
+
+
 # V3 Extension entrypoint (only if V3 is available)
 if V3_AVAILABLE:
     class PromptPaletteExtension(ComfyExtension):
@@ -168,6 +234,12 @@ if V3_AVAILABLE:
 
 
 # Legacy V1 exports for backward compatibility
-NODE_CLASS_MAPPINGS = {"PromptPalette_F": PromptPalette_F}
-NODE_DISPLAY_NAME_MAPPINGS = {"PromptPalette_F": "PromptPalette-F"}
+NODE_CLASS_MAPPINGS = {
+    "PromptPalette_F": PromptPalette_F,
+    "PromptPalette_F_Vue": PromptPalette_F_Vue
+}
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "PromptPalette_F": "PromptPalette-F",
+    "PromptPalette_F_Vue": "PromptPalette-F (Vue)"
+}
 WEB_DIRECTORY = os.path.join(os.path.dirname(os.path.realpath(__file__)), "web")

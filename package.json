@@ -1,0 +1,20 @@
+{
+  "name": "comfyui-promptpalette-f",
+  "version": "2.0.0",
+  "description": "ComfyUI PromptPalette-F with Vue.js support for Nodes 2.0",
+  "type": "module",
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.3",
+    "@vue/tsconfig": "^0.5.1",
+    "vite": "^6.3.5",
+    "@comfyorg/comfyui-frontend-types": "^1.22.1",
+    "typescript": "^5.7.2",
+    "vue": "^3.5.13",
+    "vue-tsc": "^2.1.10"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview"
+  }
+}

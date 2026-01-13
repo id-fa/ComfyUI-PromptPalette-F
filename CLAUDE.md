@@ -681,3 +681,189 @@ This section documents the V3 API and Nodes 2.0 migration process, including err
 - [ComfyUI V3 Migration Guide](https://docs.comfy.org/custom-nodes/v3_migration)
 - [ComfyUI Nodes 2.0 Documentation](https://docs.comfy.org/interface/nodes-2)
 - [ComfyUI GitHub - Custom Node Schema](https://github.com/comfyanonymous/ComfyUI/issues/8580)
+
+## Vue.js Implementation (In Progress - January 2026)
+
+This section documents the experimental Vue.js-based implementation for PromptPalette-F, which aims to provide a modern UI using Vue 3 and ComponentWidgetImpl.
+
+### Architecture Overview
+
+**New Node: PromptPalette_F_Vue**
+- Separate node alongside existing PromptPalette_F (Classic canvas-based)
+- Uses ComfyUI's `ComponentWidgetImpl` for Vue.js integration
+- Custom widget type: `PROMPT_PALETTE_VUE`
+- Only works in Classic mode (ComponentWidgetImpl limitation)
+
+**Build System:**
+- Vue 3.5.13 with TypeScript
+- Vite 6.4.1 for bundling
+- Output: `web/promptpalette-vue.js` (49KB, gzip 15KB)
+- CSS: `web/vue-assets/promptpalette-vue.css` (5.8KB)
+- Important: `emptyOutDir: false` in vite.config.mts to preserve `web/index.js`
+
+**File Structure:**
+- `src/main.ts`: Extension registration and ComponentWidgetImpl setup
+- `src/components/PromptPaletteWidget.vue`: Main Vue component with full UI
+- `src/components/PhraseRow.vue`: Individual phrase row with checkbox and weight controls
+- `src/components/GroupControls.vue`: Group toggle buttons
+- `src/components/PreviewPanel.vue`: Live preview panel
+- `nodes.py`: Added `PromptPalette_F_Vue` class (V1 API only, no V3 schema)
+
+### Implementation Progress
+
+#### ✅ Completed Features
+
+1. **Vue UI Display** (Completed)
+   - All Vue components render correctly in Classic mode
+   - ComponentWidgetImpl successfully integrated with ComfyUI
+   - Edit mode and Display mode toggle working
+   - Preview panel shows/hides correctly
+
+2. **serializeValue Implementation** (Completed)
+   - Set up in Vue component's `onMounted()` lifecycle hook
+   - Returns widget data as dictionary to Python backend
+   - Python backend successfully receives data on execution
+
+3. **Execution Caching Solution** (Completed)
+   - Added `_cache_bust` field with timestamp (`Date.now()`)
+   - Prevents ComfyUI from caching identical inputs
+   - Every execution now triggers Python `execute()` method
+
+4. **Python Backend Integration** (Completed)
+   - `PromptPalette_F_Vue.execute()` receives Vue widget data
+   - Text processing logic works correctly
+   - Output generation functional
+
+#### ⚠️ Critical Issue: Vue Props Reactivity Problem
+
+**Problem Description:**
+Checkbox state changes do not update the underlying `textContent` data correctly. The PhraseRow component always receives the initial `props.line` value, not the updated value after toggle.
+
+**Symptoms:**
+```
+1st click: propsLine: 'beautiful landscape' → newLine: '// beautiful landscape' ✅
+2nd click: propsLine: 'beautiful landscape' → newLine: '// beautiful landscape' ❌ (should remove //)
+3rd click: propsLine: 'beautiful landscape' → newLine: '// beautiful landscape' ❌
+```
+
+**Root Cause Analysis:**
+- `textContent` ref updates correctly: `'beautiful landscape'` → `'// beautiful landscape'`
+- `lines` computed updates correctly: `['beautiful landscape', ...]` → `['// beautiful landscape', ...]`
+- BUT `PhraseRow` component's `props.line` doesn't receive the updated value
+- This is a Vue reactivity issue with `v-for` and props passing
+
+**Attempted Solutions (All Failed):**
+
+1. **Changed `:key` binding** (`web/index.js:87`)
+   - From: `:key="index"`
+   - To: `:key="`${index}-${line}`"`
+   - Result: No effect, props still not updating
+
+2. **Changed props binding** (`web/index.js:96`)
+   - From: `:line="line"` (v-for loop variable)
+   - To: `:line="lines[index]"` (direct array access)
+   - Result: No effect, props still not updating
+
+3. **Added detailed logging**
+   - Confirmed `handleLineUpdate` receives correct data
+   - Confirmed `textContent.value` updates correctly
+   - Confirmed `lines.value` (computed) updates correctly
+   - BUT `PhraseRow` component doesn't see the update
+
+**Next Steps to Try:**
+
+1. **Remove or simplify `:key` attribute**
+   - Try `:key="index"` or remove key entirely
+   - Vue might be reusing components incorrectly with complex keys
+
+2. **Use `watch` in PhraseRow component**
+   - Add `watch(() => props.line, ...)` to detect prop changes
+   - Log when prop actually changes in child component
+
+3. **Refactor state management**
+   - Move checkbox state to parent component
+   - Pass down state and toggle handler separately
+   - Avoid relying on text parsing for state
+
+4. **Use `v-model` instead of `:checked` + `@change`**
+   - Create computed getter/setter in PhraseRow
+   - Sync with parent via emit
+
+5. **Force component re-creation**
+   - Use unique IDs instead of array index in `:key`
+   - Force Vue to destroy and recreate components on change
+
+### Known Limitations
+
+1. **Classic Mode Only**
+   - ComponentWidgetImpl doesn't work in Nodes 2.0 mode
+   - Vue UI only available in Classic mode
+   - This is a ComfyUI limitation, not our implementation
+
+2. **Props Reactivity Issue**
+   - Checkbox toggles don't work correctly (see above)
+   - Currently blocks full functionality
+   - Requires architectural changes to resolve
+
+3. **Build Process Required**
+   - Unlike canvas-based implementation, requires npm build step
+   - Changes to Vue components need rebuild and browser refresh
+   - Added complexity for development
+
+### Development Commands
+
+```bash
+# Install dependencies
+npm install
+
+# Build Vue components
+npm run build
+
+# Output files
+# - web/promptpalette-vue.js
+# - web/vue-assets/promptpalette-vue.css
+```
+
+### Code Locations
+
+**Backend:**
+- `nodes.py:160-220`: PromptPalette_F_Vue class
+- `nodes.py:237-240`: NODE_CLASS_MAPPINGS with Vue node
+
+**Frontend:**
+- `src/main.ts:15-76`: Extension registration
+- `src/components/PromptPaletteWidget.vue:192-210`: handleLineUpdate function (props issue)
+- `src/components/PromptPaletteWidget.vue:252-277`: updateWidgetValue function
+- `src/components/PromptPaletteWidget.vue:279-299`: serializeValue setup (in onMounted)
+- `src/components/PhraseRow.vue:60-93`: toggleComment function
+
+**Build Configuration:**
+- `package.json`: Dependencies and build script
+- `vite.config.mts`: Vite configuration with emptyOutDir: false
+- `tsconfig.json`: TypeScript configuration
+
+### Testing Status
+
+- ✅ Vue UI renders in Classic mode
+- ✅ Python backend receives data from Vue widget
+- ✅ Execution caching bypassed with _cache_bust
+- ❌ Checkbox state toggling broken (props reactivity issue)
+- ⏸️ Weight controls not tested (dependent on checkbox fix)
+- ⏸️ Group buttons not tested (dependent on checkbox fix)
+- ⏸️ Preview panel not tested (dependent on checkbox fix)
+
+### Decision: Paused Pending Investigation
+
+The Vue.js implementation is **paused** until the props reactivity issue is resolved. The canvas-based Classic mode implementation remains the primary, fully-functional version.
+
+**Reason for Pause:**
+- Core functionality (checkbox toggling) is broken
+- Multiple attempted fixes have failed
+- Requires deeper investigation into Vue reactivity patterns
+- May need architectural refactoring
+
+**Future Work:**
+- Investigate Vue reactivity debugging tools
+- Consider alternative state management patterns
+- Test with simplified component structure
+- Consult Vue.js documentation on v-for reactivity edge cases
