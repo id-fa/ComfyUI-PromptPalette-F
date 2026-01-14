@@ -174,6 +174,7 @@ app.registerExtension({
 
             // Initialize for Classic mode (will be overridden if Nodes 2.0)
             this.isEditMode = false;
+            this.hidePreview = false;
             this._promptPalette_drawCalled = false;
             this._promptPalette_setupDone = false;
             this._promptPalette_modeDetectionTimeout = null;
@@ -424,6 +425,79 @@ app.registerExtension({
                     }
                 }
             }, 100); // 100ms delay to allow onDrawForeground to be called
+        };
+
+        // computeSize override - calculate proper node height
+        nodeType.prototype.computeSize = function(out) {
+            const textWidget = findTextWidget(this);
+            if (!textWidget) {
+                return [200, 100];
+            }
+
+            const text = textWidget.value || "";
+            const lines = text.split('\n');
+
+            // Calculate widgets height
+            const widgetsHeight = getWidgetsTotalHeight(this);
+
+            // Calculate text area height (simplified estimation)
+            let textAreaHeight = CONFIG.minNodeHeight;
+
+            if (!this.isEditMode && lines.length > 0) {
+                // Check for groups
+                const groups = getAllGroups(text);
+                const groupAreaHeight = groups.length > 0 ? CONFIG.groupAreaHeight : 0;
+
+                // Estimate wrapped lines (simplified - assume average wrapping)
+                // This is a rough estimate; exact calculation happens in onDrawForeground
+                const nonEmptyLines = lines.filter(line => !isEmptyLine(line) && !isDescriptionComment(line));
+                const estimatedWrappedLines = Math.ceil(nonEmptyLines.length * 1.2); // 20% wrapping estimate
+
+                textAreaHeight = Math.max(CONFIG.minNodeHeight, groupAreaHeight + estimatedWrappedLines * CONFIG.lineHeight + 20);
+            }
+
+            // Calculate preview height
+            const previewHeight = this.hidePreview ? 0 : (CONFIG.previewSeparator + CONFIG.previewHeight);
+
+            // Total height
+            const totalHeight = textAreaHeight + widgetsHeight + previewHeight + CONFIG.widgetSpacing;
+
+            const width = out ? out[0] : (this.size ? this.size[0] : 400);
+            const height = totalHeight;
+
+            return [width, height];
+        };
+
+        // serialize override - save node state
+        const origSerialize = nodeType.prototype.serialize;
+        nodeType.prototype.serialize = function() {
+            const data = origSerialize ? origSerialize.apply(this, arguments) : {};
+
+            // Save custom state
+            data.isEditMode = this.isEditMode || false;
+            data.hidePreview = this.hidePreview || false;
+
+            return data;
+        };
+
+        // configure override - restore node state
+        const origConfigure = nodeType.prototype.configure;
+        nodeType.prototype.configure = function(info) {
+            if (origConfigure) {
+                origConfigure.apply(this, arguments);
+            }
+
+            // Restore custom state
+            if (info.isEditMode !== undefined) {
+                this.isEditMode = info.isEditMode;
+            }
+            if (info.hidePreview !== undefined) {
+                this.hidePreview = info.hidePreview;
+            }
+
+            // Recalculate size after restoration
+            const newSize = this.computeSize();
+            this.setSize(newSize);
         };
     }
 });
