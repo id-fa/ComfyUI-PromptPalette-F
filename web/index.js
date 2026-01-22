@@ -462,7 +462,9 @@ app.registerExtension({
             // Total height
             const totalHeight = textAreaHeight + widgetsHeight + previewHeight + CONFIG.widgetSpacing;
 
-            const width = out ? out[0] : (this.size ? this.size[0] : 400);
+            // IMPORTANT: Always preserve current width if it exists
+            // Only use out[0] or default 400 if this.size doesn't exist yet
+            const width = (this.size && this.size[0]) ? this.size[0] : (out ? out[0] : 400);
             const height = totalHeight;
 
             return [width, height];
@@ -495,9 +497,12 @@ app.registerExtension({
                 this.hidePreview = info.hidePreview;
             }
 
-            // Recalculate size after restoration
+            // Only recalculate size if current height is insufficient
+            // IMPORTANT: Preserve the current width to prevent unwanted width changes
             const newSize = this.computeSize();
-            this.setSize(newSize);
+            if (this.size[1] < newSize[1] - 20) { // Allow 20px tolerance
+                this.setSize([this.size[0], newSize[1]]); // Keep current width, only adjust height
+            }
         };
     }
 });
@@ -851,14 +856,18 @@ function drawCheckboxList(node, ctx, text, app) {
         totalWrappedLines += wrappedLines.length;
     });
     
-    // Adjust node size to match wrapped text line count + preview area (if shown) + group area
+    // Only adjust node size if content requires significantly more space
+    // This prevents unwanted size changes when switching tabs while ensuring content is visible
     const baseTextHeight = Math.max(CONFIG.minNodeHeight, CONFIG.widgetSpacing + groupAreaHeight + totalWrappedLines * CONFIG.lineHeight + 20);
-    const widgetsHeight = getWidgetsTotalHeight(node); // Dynamic calculation of widget heights
+    const widgetsHeight = getWidgetsTotalHeight(node);
     const previewHeight = node.hidePreview ? 0 : (CONFIG.previewSeparator + CONFIG.previewHeight);
     const totalHeight = baseTextHeight + widgetsHeight + previewHeight;
-    
-    if (node.size[1] !== totalHeight) {
-        node.size[1] = totalHeight;
+
+    // Only increase size if current size is insufficient (with 50px tolerance)
+    // Never shrink automatically to prevent jarring size changes
+    // IMPORTANT: Only adjust height, preserve width
+    if (totalHeight > node.size[1] + 50) {
+        node.setSize([node.size[0], totalHeight]); // Keep current width, only adjust height
         app.graph.setDirtyCanvas(true);
     }
 

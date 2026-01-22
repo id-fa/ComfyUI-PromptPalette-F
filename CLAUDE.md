@@ -271,6 +271,7 @@ This project requires no build process or package management - it's a pure Comfy
 - All state changes trigger canvas redraws via `app.graph.setDirtyCanvas(true)`
 - Group functionality requires no additional dependencies
 - Dynamic widget height calculation ensures compatibility across ComfyUI versions
+- Window size management: Width is always preserved across redraws and tab switches; height only increases when content requires more space (never auto-shrinks)
 
 ## Key Patterns
 
@@ -340,6 +341,13 @@ This project includes `pyproject.toml` for ComfyUI registry publication followin
 - **Repository**: https://github.com/id-fa/ComfyUI-PromptPalette-F
 
 ## Development Status
+
+### Recent Changes (January 23, 2026)
+- ✅ **Window size stability on tab switch**: Fixed issue where node window would change size when switching workflow tabs
+  - Problem: Node would become tall and narrow, or height would shrink causing text overflow
+  - Root cause: Width was not preserved during size recalculation in three functions
+  - Solution: Modified `configure`, `drawCheckboxList`, and `computeSize` to always preserve current width
+  - Result: Node maintains user-set dimensions across tab switches, only adjusts height when content requires more space
 
 ### Recent Changes (January 10, 2026)
 - ⚠️ **Nodes 2.0 button visibility**: Attempted to hide Classic mode buttons (Edit, Hide Preview) when switching to Nodes 2.0 mode without page reload
@@ -444,6 +452,27 @@ This project includes `pyproject.toml` for ComfyUI registry publication followin
 - **Code Location**: `web/index.js:314-373` (attempted `onDrawBackground` solution)
 
 ## Fixed Issues
+
+### Window Size Stability on Tab Switch (Resolved - January 23, 2026)
+- **Issue**: Node window size would change unpredictably when switching between workflow tabs
+  - Symptom 1: Node would become tall and narrow (width decreased significantly)
+  - Symptom 2: Height would shrink, causing text content to overflow below the node boundary
+  - Symptom 3: User-set window dimensions were not respected after tab switching
+- **Root Cause**: Three functions were not preserving node width during size recalculation:
+  1. `configure()`: Called on tab switch/workflow load, used `setSize(newSize)` which overwrote both width and height
+  2. `drawCheckboxList()`: Called during rendering, set `node.size[1] = totalHeight` directly without preserving width
+  3. `computeSize()`: Used `out[0]` parameter for width calculation, which could override current width
+- **Solution**: Modified all three functions to always preserve current width:
+  - `configure()`: Changed to `this.setSize([this.size[0], newSize[1]])` - preserves current width, only adjusts height when needed (with 20px tolerance)
+  - `drawCheckboxList()`: Changed to `node.setSize([node.size[0], totalHeight])` - preserves current width (with 50px tolerance to prevent frequent changes)
+  - `computeSize()`: Changed width calculation to `const width = (this.size && this.size[0]) ? this.size[0] : (out ? out[0] : 400)` - prioritizes current width
+- **Behavior After Fix**:
+  - Width is always preserved across tab switches and redraws
+  - Height only increases when content requires significantly more space
+  - Node never automatically shrinks to prevent jarring visual changes
+  - User-set dimensions are respected and maintained
+- **Status**: ✅ Resolved
+- **Code Location**: `web/index.js:500` (configure), `web/index.js:865` (drawCheckboxList), `web/index.js:467` (computeSize)
 
 ### Group Toggle Bug with Multiple Tags (Resolved - 2025)
 - **Issue**: Groups that only appear on lines with multiple group tags (e.g., `[group_a2]` appearing only with `[group_a]`) could be turned ON but not OFF
