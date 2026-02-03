@@ -69,6 +69,11 @@ model \[v2.1\] settings [model21]
 - **separator_newline** - 各区切り文字の後に改行を追加
 - **add_newline** - 最終出力の末尾に改行を追加
 
+## 関連
+
+[Claude CodeでComfyUIのカスタムノードを改造してみた - ふぁメモ](https://fa.hatenadiary.jp/entry/20250921/1758380400)
+
+
 ---
 
 # ComfyUI PromptPalette-F
