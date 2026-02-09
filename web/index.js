@@ -1,4 +1,5 @@
 import { app } from "../../scripts/app.js";
+import { api } from "../../scripts/api.js";
 
 const CONFIG = {
     minNodeHeight: 80,
@@ -153,6 +154,34 @@ function toggleAllPhrases(text, activate) {
 app.registerExtension({
     name: "PromptPalette_F",
 
+    setup() {
+        // Patch api.queuePrompt to inject preview_override values
+        // directly into the prompt data before it's sent to the backend.
+        // This is the most reliable approach as it modifies data right before the HTTP request.
+        const origQueuePrompt = api.queuePrompt.bind(api);
+        api.queuePrompt = async function(number, { output, workflow }) {
+            try {
+                if (output) {
+                    for (const [nodeId, nodeData] of Object.entries(output)) {
+                        if (nodeData.class_type === "PromptPalette_F") {
+                            const node = app.graph.getNodeById(parseInt(nodeId));
+                            if (node) {
+                                const override = node._promptPalette_previewOverride;
+                                if (override && override.trim() !== "") {
+                                    nodeData.inputs.preview_override = override;
+                                    console.log("[PromptPalette_F] Injecting preview override for node", nodeId);
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (e) {
+                console.error("[PromptPalette_F] Error injecting preview override:", e);
+            }
+            return origQueuePrompt(number, { output, workflow });
+        };
+    },
+
     async beforeRegisterNodeDef(nodeType, nodeData, app) {
         if (nodeData.name === "PromptPalette_F") {
             // Set up both Classic and Nodes 2.0 support
@@ -184,6 +213,10 @@ app.registerExtension({
             const newlineWidget = findNewlineWidget(this);
             const separatorNewlineWidget = findSeparatorNewlineWidget(this);
             const trailingSeparatorWidget = findTrailingSeparatorWidget(this);
+
+            // Hide override widget if it exists (managed programmatically)
+            const overrideWidget = findOverrideWidget(this);
+            if (overrideWidget) overrideWidget.hidden = true;
 
             if (textWidget) {
                 // Hide widgets initially for Classic mode
@@ -294,6 +327,8 @@ app.registerExtension({
                 if (separatorNewlineWidget) separatorNewlineWidget.hidden = true;
                 const trailingSeparatorWidget = findTrailingSeparatorWidget(this);
                 if (trailingSeparatorWidget) trailingSeparatorWidget.hidden = true;
+                const overrideWidgetClassic = findOverrideWidget(this);
+                if (overrideWidgetClassic) overrideWidgetClassic.hidden = true;
 
                 // Force node size recalculation to show buttons
                 this.setSize(this.computeSize());
@@ -417,6 +452,9 @@ app.registerExtension({
                     if (separatorNewlineWidget) separatorNewlineWidget.hidden = false;
                     const trailingSeparatorWidget = findTrailingSeparatorWidget(this);
                     if (trailingSeparatorWidget) trailingSeparatorWidget.hidden = false;
+                    // Keep override widget hidden in Nodes 2.0 mode
+                    const overrideWidgetNodes2 = findOverrideWidget(this);
+                    if (overrideWidgetNodes2) overrideWidgetNodes2.hidden = true;
 
                     // Force node size recalculation
                     this.setSize(this.computeSize());
@@ -497,6 +535,11 @@ app.registerExtension({
                 this.hidePreview = info.hidePreview;
             }
 
+            // Clear preview_override on workflow load (temporary feature)
+            setPreviewOverride(this, "");
+            const overrideWidgetCfg = findOverrideWidget(this);
+            if (overrideWidgetCfg) overrideWidgetCfg.hidden = true;
+
             // Only recalculate size if current height is insufficient
             // IMPORTANT: Preserve the current width to prevent unwanted width changes
             const newSize = this.computeSize();
@@ -555,6 +598,16 @@ function findTrailingSeparatorWidget(node) {
     if (!node.widgets) return null;
     for (const w of node.widgets) {
         if (w.name === "trailing_separator") {
+            return w;
+        }
+    }
+    return null;
+}
+
+function findOverrideWidget(node) {
+    if (!node.widgets) return null;
+    for (const w of node.widgets) {
+        if (w.name === "preview_override") {
             return w;
         }
     }
@@ -625,10 +678,16 @@ function setupClickHandler(node, textWidget, app) {
     
     node.onMouseDown = function(e, pos) {
         if (this.isEditMode) return;
-        
+
+        // Check preview button clicks first (reverse order to prioritize latest-added areas)
+        // This ensures preview buttons are not blocked by overlapping text toggle areas
         const clickedArea = this.findClickedArea(pos);
         if (clickedArea) {
             this.handleClickableAreaAction(clickedArea, textWidget, app);
+            // Consume event for preview actions to prevent LiteGraph interference
+            if (clickedArea.action === 'preview_edit' || clickedArea.action === 'preview_reset') {
+                return true;
+            }
         }
     };
     
@@ -637,8 +696,12 @@ function setupClickHandler(node, textWidget, app) {
 
 function findClickedArea(pos) {
     const [x, y] = pos;
-    for (const area of this.clickableAreas || []) {
-        if (x >= area.x && x <= area.x + area.w && 
+    const areas = this.clickableAreas || [];
+    // Iterate in reverse order so that later-added areas (preview buttons)
+    // take priority over earlier-added areas (text toggles) when overlapping
+    for (let i = areas.length - 1; i >= 0; i--) {
+        const area = areas[i];
+        if (x >= area.x && x <= area.x + area.w &&
             y >= area.y && y <= area.y + area.h) {
             return area;
         }
@@ -701,6 +764,18 @@ function handleClickableAreaAction(area, textWidget, app) {
                 textWidget.value = toggleAllPhrases(textWidget.value, false);
                 app.graph.setDirtyCanvas(true);
             }
+            break;
+        case 'preview_edit':
+            {
+                // Defer editor creation to next tick to prevent LiteGraph from
+                // stealing focus immediately after mousedown event processing
+                const nodeRef = this;
+                setTimeout(() => openPreviewEditor(nodeRef), 50);
+            }
+            break;
+        case 'preview_reset':
+            setPreviewOverride(this, "");
+            app.graph.setDirtyCanvas(true);
             break;
     }
 }
@@ -1379,6 +1454,10 @@ function getColors() {
         checkboxSymbolColor: themeColors.comfyInputBg,
         weightButtonFillColor: themeColors.comfyInputBg,
         weightButtonSymbolColor: themeColors.inputText + "99",
+        comfyInputBg: themeColors.comfyInputBg,
+        borderColor: themeColors.borderColor,
+        descripText: themeColors.descripText,
+        errorText: themeColors.errorText,
     };
     return colorCache;
 }
@@ -1406,6 +1485,178 @@ function expandHexColor(color) {
 }
 
 // ========================================
+// Preview Editor (textarea overlay)
+// ========================================
+
+function setPreviewOverride(node, value) {
+    // Store on node property for frontend display
+    node._promptPalette_previewOverride = value;
+    // Sync to widget for backend serialization (if widget exists)
+    const widget = findOverrideWidget(node);
+    if (widget) {
+        widget.value = value;
+    }
+}
+
+function getPreviewOverride(node) {
+    // Read from node property (always available, faster)
+    const override = node._promptPalette_previewOverride || "";
+    return override.trim() !== "" ? override : "";
+}
+
+function openPreviewEditor(node) {
+    // Prevent multiple editors
+    if (node._promptPalette_editorOpen) return;
+    node._promptPalette_editorOpen = true;
+
+    const canvas = app.canvas;
+    const canvasEl = canvas.canvas;
+
+    // Calculate preview area position in screen coordinates
+    const nodePos = node.pos;
+    const nodeWidth = node.size[0];
+    const nodeHeight = node.size[1];
+
+    // Preview area in node-local coordinates
+    const previewX = CONFIG.sideNodePadding;
+    const previewY = nodeHeight - CONFIG.previewHeight - 10;
+    const previewWidth = nodeWidth - CONFIG.sideNodePadding * 2;
+
+    // Transform node-local coordinates to canvas coordinates, then to screen coordinates
+    const transform = canvas.ds;
+    const canvasRect = canvasEl.getBoundingClientRect();
+
+    const screenX = canvasRect.left + (nodePos[0] + previewX) * transform.scale + transform.offset[0];
+    const screenY = canvasRect.top + (nodePos[1] + previewY + 22) * transform.scale + transform.offset[1];
+    const screenWidth = previewWidth * transform.scale;
+    const screenHeight = (CONFIG.previewHeight - 25) * transform.scale;
+
+    // Get current preview text (override if exists, otherwise generated)
+    const currentOverride = getPreviewOverride(node);
+    const previewText = currentOverride || generatePreview(node);
+
+    const toolbarHeight = Math.max(22, 22 * transform.scale);
+
+    // Create container for toolbar + textarea
+    const container = document.createElement("div");
+    container.style.cssText = `
+        position: fixed;
+        left: ${screenX}px;
+        top: ${screenY - toolbarHeight}px;
+        width: ${screenWidth}px;
+        z-index: 10000;
+    `;
+
+    // Create toolbar with hint and close button
+    const toolbar = document.createElement("div");
+    toolbar.style.cssText = `
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        height: ${toolbarHeight}px;
+        background: #ff9800;
+        color: #1a1a2e;
+        font-family: sans-serif;
+        font-size: ${Math.max(9, 11 * transform.scale)}px;
+        font-weight: bold;
+        padding: 0 6px;
+        border-radius: 4px 4px 0 0;
+        box-sizing: border-box;
+        user-select: none;
+    `;
+
+    const hintLabel = document.createElement("span");
+    hintLabel.textContent = "Editing Preview — Esc: cancel";
+
+    const closeBtn = document.createElement("span");
+    closeBtn.textContent = "\u2715 Save";
+    closeBtn.style.cssText = `
+        cursor: pointer;
+        padding: 1px 6px;
+        border-radius: 3px;
+        background: rgba(0,0,0,0.15);
+    `;
+
+    toolbar.appendChild(hintLabel);
+    toolbar.appendChild(closeBtn);
+    container.appendChild(toolbar);
+
+    // Create textarea element
+    const textarea = document.createElement("textarea");
+    textarea.value = previewText;
+    textarea.style.cssText = `
+        display: block;
+        width: 100%;
+        height: ${screenHeight}px;
+        font-family: monospace;
+        font-size: ${Math.max(10, CONFIG.previewFontSize * transform.scale)}px;
+        line-height: ${CONFIG.previewLineHeight * transform.scale}px;
+        background: #1a1a2e;
+        color: #e0e0e0;
+        border: 2px solid #ff9800;
+        border-top: none;
+        border-radius: 0 0 4px 4px;
+        padding: 4px 6px;
+        resize: none;
+        outline: none;
+        box-sizing: border-box;
+    `;
+    container.appendChild(textarea);
+
+    document.body.appendChild(container);
+
+    let cancelled = false;
+    let closing = false;
+
+    function closeEditor(save) {
+        if (closing) return;
+        closing = true;
+        if (!container.parentNode) {
+            node._promptPalette_editorOpen = false;
+            return;
+        }
+        if (save && !cancelled) {
+            setPreviewOverride(node, textarea.value);
+        }
+        container.remove();
+        node._promptPalette_editorOpen = false;
+        app.graph.setDirtyCanvas(true);
+    }
+
+    // Close button saves and closes
+    closeBtn.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        closeEditor(true);
+    });
+
+    textarea.addEventListener("blur", (e) => {
+        // Don't close if clicking the close button (it handles its own close)
+        if (e.relatedTarget && container.contains(e.relatedTarget)) return;
+        // Small delay to prevent premature close from focus stealing
+        setTimeout(() => closeEditor(true), 100);
+    });
+
+    // Defer focus to avoid LiteGraph canvas stealing it during mousedown processing
+    setTimeout(() => {
+        if (textarea.parentNode) {
+            textarea.focus();
+            textarea.select();
+        }
+    }, 10);
+
+    textarea.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") {
+            cancelled = true;
+            closeEditor(false);
+            e.preventDefault();
+        }
+        // Prevent canvas from receiving key events
+        e.stopPropagation();
+    });
+}
+
+// ========================================
 // Preview Functionality
 // ========================================
 
@@ -1424,10 +1675,14 @@ function generatePreview(node) {
     const separatorNewline = separatorNewlineWidget ? separatorNewlineWidget.value : false;
     const trailingSeparator = trailingSeparatorWidget ? trailingSeparatorWidget.value : false;
 
-    // Reset scroll position when content changes
+    // Reset scroll position and clear override when source content changes
     if (!node.lastPreviewText || node.lastPreviewText !== text) {
         node.previewScrollOffset = 0;
         node.lastPreviewText = text;
+        // Clear preview override when source text changes
+        if (getPreviewOverride(node)) {
+            setPreviewOverride(node, "");
+        }
     }
 
     // Replicate Python's process method logic
@@ -1486,39 +1741,94 @@ function drawPreview(node, ctx) {
     if (!node || node.isEditMode || node.hidePreview) return;
 
     try {
-        const preview = generatePreview(node);
-        
+        // Check for override (stored on node property for reliability)
+        const overrideText = getPreviewOverride(node);
+        const hasOverride = overrideText !== "";
+        const preview = hasOverride ? overrideText : generatePreview(node);
+
         const nodeWidth = node.size[0];
         const nodeHeight = node.size[1];
-    
+
     // Calculate preview area (at the bottom of the node)
-    // Widgets are now at the top, so preview goes at the bottom
-    const previewY = nodeHeight - CONFIG.previewHeight - 10; // 10px padding from bottom
+    const previewY = nodeHeight - CONFIG.previewHeight - 10;
     const previewX = CONFIG.sideNodePadding;
     const previewWidth = nodeWidth - CONFIG.sideNodePadding * 2;
 
     // Draw preview background
     const colors = getColors();
-    
-    // Ensure valid color values
+
     const bgColor = colors.comfyInputBg || "#222222";
-    ctx.fillStyle = bgColor + "80"; // Semi-transparent background
+    ctx.fillStyle = bgColor + "80";
     ctx.fillRect(previewX, previewY, previewWidth, CONFIG.previewHeight);
 
-    // Draw preview border
-    ctx.strokeStyle = colors.borderColor;
-    ctx.lineWidth = 1;
+    // Draw preview border (orange if edited)
+    ctx.strokeStyle = hasOverride ? "#ff9800" : colors.borderColor;
+    ctx.lineWidth = hasOverride ? 2 : 1;
     ctx.strokeRect(previewX, previewY, previewWidth, CONFIG.previewHeight);
 
     // Draw preview label
-    ctx.fillStyle = colors.descripText;
+    const labelText = hasOverride ? "Preview (Edited):" : "Preview:";
+    ctx.fillStyle = hasOverride ? "#ff9800" : colors.descripText;
     ctx.font = `${CONFIG.previewFontSize}px monospace`;
     ctx.textAlign = "left";
-    ctx.fillText("Preview:", previewX + 6, previewY + 15);
+    ctx.fillText(labelText, previewX + 6, previewY + 15);
+
+    // Draw Edit button
+    const editLabel = "\u270E Edit";
+    ctx.font = `${CONFIG.previewFontSize}px monospace`;
+    const editWidth = ctx.measureText(editLabel).width + 12;
+    let buttonX = previewX + previewWidth - editWidth - 4;
+    if (hasOverride) {
+        // Also draw Reset button to the left of Edit
+        const resetLabel = "\u21BA Reset";
+        const resetWidth = ctx.measureText(resetLabel).width + 12;
+        const resetX = buttonX - resetWidth - 6;
+
+        // Reset button background
+        ctx.fillStyle = "#f4433680";
+        ctx.beginPath();
+        ctx.roundRect(resetX, previewY + 3, resetWidth, 16, 3);
+        ctx.fill();
+        ctx.fillStyle = "#ffffff";
+        ctx.textAlign = "center";
+        ctx.fillText(resetLabel, resetX + resetWidth / 2, previewY + 15);
+
+        // Reset clickable area
+        node.clickableAreas.push({
+            x: resetX,
+            y: previewY + 3,
+            w: resetWidth,
+            h: 16,
+            action: 'preview_reset'
+        });
+
+        buttonX = previewX + previewWidth - editWidth - 4;
+    }
+
+    // Edit button background
+    ctx.fillStyle = "#4CAF5080";
+    ctx.beginPath();
+    ctx.roundRect(buttonX, previewY + 3, editWidth, 16, 3);
+    ctx.fill();
+    ctx.fillStyle = "#ffffff";
+    ctx.textAlign = "center";
+    ctx.fillText(editLabel, buttonX + editWidth / 2, previewY + 15);
+
+    // Edit clickable area
+    node.clickableAreas.push({
+        x: buttonX,
+        y: previewY + 3,
+        w: editWidth,
+        h: 16,
+        action: 'preview_edit'
+    });
+
+    ctx.textAlign = "left";
 
     // Handle empty preview
     if (!preview || !preview.trim()) {
         ctx.fillStyle = colors.inactiveTextColor;
+        ctx.font = `${CONFIG.previewFontSize}px monospace`;
         ctx.fillText("(empty)", previewX + 6, previewY + 35);
         return;
     }
@@ -1528,34 +1838,32 @@ function drawPreview(node, ctx) {
     ctx.font = `${CONFIG.previewFontSize}px monospace`;
     ctx.textAlign = "left";
     const textAreaWidth = previewWidth - 12 - CONFIG.scrollBarWidth;
-    
+
     // Split by newlines first, then wrap each line
     const previewLines = preview.split('\n');
     let allWrappedLines = [];
-    
+
     for (const line of previewLines) {
         if (line === '') {
-            // Empty line - add as is
             allWrappedLines.push('');
         } else {
-            // Wrap the line and add all wrapped parts
             const wrappedLine = wrapText(ctx, line, textAreaWidth);
             allWrappedLines = allWrappedLines.concat(wrappedLine);
         }
     }
-    
+
     // Calculate scroll bounds
     const maxScrollOffset = Math.max(0, allWrappedLines.length - CONFIG.previewVisibleLines);
     node.previewScrollOffset = Math.max(0, Math.min(node.previewScrollOffset || 0, maxScrollOffset));
-    
+
     // Draw visible lines with scroll offset
     const textStartY = previewY + 35;
-    
+
     for (let i = 0; i < CONFIG.previewVisibleLines && (i + node.previewScrollOffset) < allWrappedLines.length; i++) {
         const lineIndex = i + node.previewScrollOffset;
         const line = allWrappedLines[lineIndex];
         const currentY = textStartY + i * CONFIG.previewLineHeight;
-        
+
         if (line !== '') {
             ctx.fillStyle = colors.defaultTextColor || "#dddddd";
             ctx.font = `${CONFIG.previewFontSize}px monospace`;
@@ -1563,18 +1871,20 @@ function drawPreview(node, ctx) {
             ctx.fillText(line, previewX + 6, currentY);
         }
     }
-    
+
     // Draw scroll bar if needed
     if (allWrappedLines.length > CONFIG.previewVisibleLines) {
-        drawScrollBar(ctx, previewX, previewY, previewWidth, CONFIG.previewHeight, 
+        drawScrollBar(ctx, previewX, previewY, previewWidth, CONFIG.previewHeight,
                      node.previewScrollOffset, maxScrollOffset, colors, node);
     }
-    
+
     } catch (error) {
         // If there's an error in preview rendering, show error message
         const colors = getColors();
         ctx.fillStyle = colors.errorText || "#ff4444";
         ctx.font = `${CONFIG.previewFontSize}px monospace`;
+        const previewX = CONFIG.sideNodePadding;
+        const previewY = node.size[1] - CONFIG.previewHeight - 10;
         ctx.fillText("Preview Error", previewX + 6, previewY + 35);
         console.error("Preview render error:", error);
     }

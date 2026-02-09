@@ -54,6 +54,11 @@ class PromptPalette_F(BaseNodeClass):
                         "add_newline",
                         default=False
                     ),
+                    io.String.Input(
+                        "preview_override",
+                        optional=True,
+                        default=""
+                    ),
                 ],
                 outputs=[io.String.Output()]
             )
@@ -74,6 +79,7 @@ class PromptPalette_F(BaseNodeClass):
                 "trailing_separator": ("BOOLEAN", {"default": False}),
                 "separator_newline": ("BOOLEAN", {"default": False}),
                 "add_newline": ("BOOLEAN", {"default": False}),
+                "preview_override": ("STRING", {"default": ""}),
             },
         }
 
@@ -99,7 +105,15 @@ class PromptPalette_F(BaseNodeClass):
 
     @classmethod
     def execute(cls, text, prefix=None, separator=", ", add_newline=False,
-                separator_newline=False, trailing_separator=False) -> io.NodeOutput:
+                separator_newline=False, trailing_separator=False,
+                preview_override="") -> io.NodeOutput:
+        # If preview_override is set, return it directly (temporary edit)
+        if preview_override:
+            if V3_AVAILABLE:
+                return io.NodeOutput(preview_override)
+            else:
+                return (preview_override,)
+
         lines = text.split("\n")
         filtered_lines = []
         for line in lines:
