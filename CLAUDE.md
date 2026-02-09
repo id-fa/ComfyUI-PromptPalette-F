@@ -49,14 +49,15 @@ The project follows ComfyUI's custom node structure with V3 API compliance and d
 
 ### Core Components
 
-1. **PromptPalette_F Node (V3/V1 Hybrid)** (`nodes.py:21-153`):
-   - **Conditional V3 Schema** (lines 23-59): Defined via `define_schema()` classmethod when V3 available
+1. **PromptPalette_F Node (V3/V1 Hybrid)** (`nodes.py:21-167`):
+   - **Conditional V3 Schema** (lines 23-64): Defined via `define_schema()` classmethod when V3 available
      - Input types: Uses `io.String.Input()` and `io.Boolean.Input()` (not string-based)
      - Important: `rows` parameter not supported by V3 API (removed after initial error)
-   - **V1 INPUT_TYPES** (lines 62-78): Always defined for backward compatibility
+   - **V1 INPUT_TYPES** (lines 67-84): Always defined for backward compatibility
      - String-based types: `"STRING"`, `"BOOLEAN"`
      - Uses `forceInput` (V1 style) instead of `force_input` (V3 style)
-   - **Execution**: `execute()` classmethod processes text (lines 101-151)
+   - **Execution**: `execute()` classmethod processes text (lines 106-167)
+   - **Preview override**: `preview_override` parameter enables temporary prompt editing from frontend; when non-empty, bypasses all text processing and returns override text directly (lines 110-115)
    - Processes multiline text input by filtering commented lines (lines starting with `//` or `#`)
    - Handles inline comments by splitting on `//` and keeping only the content before
    - Uses custom separator (default: `, `) to join non-commented lines
@@ -65,10 +66,10 @@ The project follows ComfyUI's custom node structure with V3 API compliance and d
    - Supports adding newline at end of output (`add_newline` parameter)
    - Supports adding newline after separator (`separator_newline` parameter)
    - Supports trailing separator (`trailing_separator` parameter)
-   - **Group tag filtering**: Removes group tags `[group]` from output using `remove_group_tags_with_escape()` staticmethod (lines 84-98)
+   - **Group tag filtering**: Removes group tags `[group]` from output using `remove_group_tags_with_escape()` staticmethod (lines 91-104)
    - **Escape character support**: Preserves literal brackets using `\[` and `\]` escape sequences
-   - **Conditional return format**: Returns `io.NodeOutput()` if V3 available, tuple otherwise (lines 150-153)
-   - **V3 Extension** (lines 157-167): Only defined if V3 API available, exported via `comfy_entrypoint()` async function
+   - **Conditional return format**: Returns `io.NodeOutput()` if V3 available, tuple otherwise (lines 163-167)
+   - **V3 Extension** (lines 170-181): Only defined if V3 API available, exported via `comfy_entrypoint()` async function
 
 2. **Web Extension - Adaptive Dual Mode** (`web/index.js`):
    - **Single Unified Registration**: Single extension "PromptPalette_F" that adapts to rendering mode
@@ -161,21 +162,36 @@ The project follows ComfyUI's custom node structure with V3 API compliance and d
    - All options available as checkboxes in edit mode (widget finding functions: lines 280-308)
    - Provides flexible output formatting for different use cases
 
-11. **Preview System** (`web/index.js:1107-1346`):
+11. **Preview System** (`web/index.js`):
    - **Real-time preview**: Displays processed output in preview area at bottom of node
-   - **Text generation**: `generatePreview()` replicates Python processing logic (lines 1107-1130)
-   - **Text processing**: `processTextForPreview()` mirrors backend `process()` method (lines 1132-1176)
-   - **Group tag removal**: Automatically removes group tags `[group]` from preview using `removeGroupTags()` (line 1122)
+   - **Text generation**: `generatePreview()` replicates Python processing logic
+   - **Text processing**: `processTextForPreview()` mirrors backend `execute()` method
+   - **Group tag removal**: Automatically removes group tags `[group]` from preview using `removeGroupTags()`
    - **Escape character support**: Preserves literal brackets `\[` `\]` in preview output
    - **Scrollable display**: Preview supports scrolling for long output with scroll buttons
    - **Scroll management**: Tracks scroll offset and calculates max scroll based on line count
-   - **Visual rendering**: `drawPreview()` handles canvas drawing with proper layout (lines 1178-1275)
-   - **Scroll controls**: `drawScrollBar()` and `drawScrollButton()` provide interactive scrolling (lines 1277-1346)
+   - **Visual rendering**: `drawPreview()` handles canvas drawing with proper layout
+   - **Scroll controls**: `drawScrollBar()` and `drawScrollButton()` provide interactive scrolling
    - **Toggle functionality**: "Show Preview" / "Hide Preview" button to control visibility
    - **Automatic text wrapping**: Preview text wraps within available width
    - **Theme integration**: Uses theme colors for consistent appearance
 
-12. **Dynamic Widget Height System** (`web/index.js:449-468`):
+12. **Preview Edit System** (`web/index.js`, `nodes.py`):
+   - **Temporary prompt editing**: Users can edit the generated preview text directly; the edited text becomes the actual node output
+   - **Edit button**: `[✎ Edit]` button in preview area header opens an HTML textarea overlay
+   - **Reset button**: `[↺ Reset]` button appears when override is active, clears the edit
+   - **Visual indicators**: Orange border and "Preview (Edited):" label when override is active
+   - **Toolbar**: Orange toolbar above textarea shows "Editing Preview — Esc: cancel" hint and "✕ Save" close button
+   - **Close behavior**: Click outside (blur) saves and closes; Esc cancels without saving; ✕ Save button explicitly saves
+   - **Temporary nature**: Edits are not saved to workflow; override clears on workflow load (`configure()`), source text change, and manual reset
+   - **Backend integration**: `preview_override` parameter in `nodes.py:execute()` returns override text directly when non-empty
+   - **Frontend-to-backend communication**: `setup()` patches `api.queuePrompt` to inject `_promptPalette_previewOverride` into prompt data before HTTP request
+   - **State management**: Override stored on `node._promptPalette_previewOverride` property; synced to hidden `preview_override` widget if available
+   - **Helper functions**: `setPreviewOverride(node, value)`, `getPreviewOverride(node)`, `openPreviewEditor(node)`, `findOverrideWidget(node)`
+   - **Auto-clear**: Override automatically clears when source text changes (checkbox toggle, group toggle, direct text edit)
+   - **Clickable area integration**: `preview_edit` and `preview_reset` actions in `handleClickableAreaAction()`
+
+13. **Dynamic Widget Height System** (`web/index.js:449-468`):
    - **Automatic height calculation**: `getWidgetsTotalHeight()` dynamically calculates widget area height
    - **Hidden widget handling**: Skips hidden widgets (text, separator, etc.) when calculating height
    - **ComfyUI version compatibility**: Adapts to different ComfyUI versions automatically
@@ -215,6 +231,16 @@ This project requires no build process or package management - it's a pure Comfy
    - Toggle preview visibility
    - Verify real-time preview updates
    - Test preview scrolling with long output
+
+5. **Preview Edit**:
+   - Click `[✎ Edit]` button in preview area header
+   - Verify toolbar appears with "Editing Preview — Esc: cancel" hint and "✕ Save" button
+   - Edit text and click outside → verify "Preview (Edited):" label and orange border
+   - Queue Prompt → verify output uses edited text (check console for injection log)
+   - Click `[↺ Reset]` → verify override clears and normal preview returns
+   - Test Esc key cancels edit without saving
+   - Test source text change (checkbox toggle) → verify override auto-clears
+   - Save/reload workflow → verify override does not persist
 
 #### Nodes 2.0 Mode Testing (Basic Support)
 1. **Mode Verification**:
@@ -283,15 +309,19 @@ This project requires no build process or package management - it's a pure Comfy
 - **Weight adjustment**: Uses regex parsing to handle `(text:weight)` notation
 - **Canvas interaction**: Mouse clicks are mapped to clickable areas (checkboxes, text areas, weight buttons, group buttons, global toggle buttons)
 - **Row selection**: Entire phrase text area is clickable for toggling (excluding weight controls on right edge)
-- **State management**: Node tracks edit mode, clickable areas, widget visibility, and text wrapping
+- **Preview override**: Temporary edit stored on `node._promptPalette_previewOverride`, injected into prompt via `api.queuePrompt` patch, auto-cleared on source text change
+- **HTML overlay pattern**: `openPreviewEditor()` creates `position: fixed` container with toolbar + textarea, uses canvas coordinate transform for positioning, manages focus with `setTimeout` delays to avoid LiteGraph interference
+- **State management**: Node tracks edit mode, clickable areas, widget visibility, text wrapping, and preview override
 - **Canvas redrawing**: Triggered via `app.graph.setDirtyCanvas(true)` after state changes
 
 ## Code Organization
 
-### web/index.js Structure (approx. 1,500+ lines):
+### web/index.js Structure (approx. 1,700+ lines):
+- **Imports**: `app` from ComfyUI app.js, `api` from ComfyUI api.js
 - **Configuration**: CONFIG object with UI constants, including widgetSpacing
 - **Group Parsing Functions**: Group tag extraction, status tracking, simplified toggle logic, global toggles
 - **Unified Extension Registration**: Single "PromptPalette_F" extension with adaptive mode detection
+  - `setup()`: Patches `api.queuePrompt` to inject preview override values into prompt data
   - `setupAdaptiveMode()`: Main setup function
   - `onNodeCreated`: Initializes widgets for both modes, creates 3 warning widgets for Nodes 2.0
   - `onDrawForeground`: Canvas rendering callback (Classic mode only) - creates buttons, draws UI
@@ -304,20 +334,21 @@ This project requires no build process or package management - it's a pure Comfy
 - **Drawing Functions**: Canvas rendering for checkboxes, phrases, group controls, weight buttons, clickable text areas (Classic mode only)
 - **Weight System**: Parsing, adjustment, formatting for `(text:weight)` notation
 - **Theme/Color System**: Dynamic theme integration, color caching
-- **Preview System**: Preview generation, rendering, scrolling (Classic mode only)
+- **Preview Override Functions**: `findOverrideWidget()`, `setPreviewOverride()`, `getPreviewOverride()`, `openPreviewEditor()` (HTML textarea overlay with toolbar)
+- **Preview System**: Preview generation, rendering, scrolling, edit/reset buttons (Classic mode only)
 - **Entry Point**: Extension registration
 
-### nodes.py Structure (175 lines):
+### nodes.py Structure (188 lines):
 - **V3 API Conditional Imports**: Lines 4-12 (try/except block for comfy_api.latest imports, V3_AVAILABLE flag, dummy ComfyNode class)
 - **Base Class Selection**: Lines 14-18 (conditionally inherit from io.ComfyNode or object)
-- **Class Definition**: Lines 21-153 (PromptPalette_F class with conditional V3/V1 support)
-  - Lines 23-59: Conditional V3 `define_schema()` classmethod (only if V3_AVAILABLE)
-  - Lines 62-78: V1 `INPUT_TYPES()` classmethod (always defined)
-  - Lines 80-82: V1-style class attributes (RETURN_TYPES, FUNCTION, CATEGORY)
-  - Lines 84-98: `remove_group_tags_with_escape()` staticmethod
-  - Lines 101-153: `execute()` classmethod with conditional return format
-- **V3 Extension**: Lines 157-167 (PromptPaletteExtension and comfy_entrypoint, only if V3_AVAILABLE)
-- **V1 Legacy Exports**: Lines 171-173 (NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS, WEB_DIRECTORY - always defined)
+- **Class Definition**: Lines 21-167 (PromptPalette_F class with conditional V3/V1 support)
+  - Lines 23-64: Conditional V3 `define_schema()` classmethod (includes `preview_override` optional input)
+  - Lines 67-84: V1 `INPUT_TYPES()` classmethod (includes `preview_override` in optional)
+  - Lines 86-88: V1-style class attributes (RETURN_TYPES, FUNCTION, CATEGORY)
+  - Lines 91-104: `remove_group_tags_with_escape()` staticmethod
+  - Lines 106-167: `execute()` classmethod with `preview_override` early return and conditional return format
+- **V3 Extension**: Lines 170-181 (PromptPaletteExtension and comfy_entrypoint, only if V3_AVAILABLE)
+- **V1 Legacy Exports**: Lines 184-188 (NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS, WEB_DIRECTORY - always defined)
 
 ### __init__.py Structure (5 lines):
 - **V1-only Entry Point**: Imports and exports V1 mappings directly from nodes.py
@@ -341,6 +372,16 @@ This project includes `pyproject.toml` for ComfyUI registry publication followin
 - **Repository**: https://github.com/id-fa/ComfyUI-PromptPalette-F
 
 ## Development Status
+
+### Recent Changes (February 9, 2026)
+- ✅ **Preview edit feature**: Added temporary prompt editing via preview area
+  - Backend: `preview_override` parameter added to both V3/V1 schemas in `nodes.py`; early return in `execute()` when override is set
+  - Frontend: `[✎ Edit]` / `[↺ Reset]` buttons in preview area header
+  - HTML textarea overlay with orange toolbar ("Editing Preview — Esc: cancel" + "✕ Save" button)
+  - Override stored on `node._promptPalette_previewOverride`; injected into prompt via `api.queuePrompt` patch in `setup()`
+  - Visual indicators: orange border, "Preview (Edited):" label when override active
+  - Auto-clear on source text change, workflow load, and manual reset
+  - Temporary by design: overrides do not persist across workflow save/load
 
 ### Recent Changes (January 23, 2026)
 - ✅ **Window size stability on tab switch**: Fixed issue where node window would change size when switching workflow tabs
@@ -374,6 +415,7 @@ This project includes `pyproject.toml` for ComfyUI registry publication followin
 #### Classic Mode (LiteGraph.js): ✅ Fully Functional
 - ✅ Basic functionality: Text processing, separator controls, prefix input
 - ✅ Preview functionality: Real-time preview panel (white screen bug resolved)
+- ✅ Preview edit: Temporary prompt editing via textarea overlay with toolbar
 - ✅ Scroll functionality: Preview scrolling with visible scroll bar (visibility bug fixed)
 - ✅ Group toggle: Multi-group support (interference bug resolved)
 - ✅ Row selection: Clickable phrase text areas
@@ -529,6 +571,7 @@ This project includes `pyproject.toml` for ComfyUI registry publication followin
   - ✅ Group management buttons
   - ✅ Global toggle buttons ([all]/[off])
   - ✅ Live preview panel with scrolling
+  - ✅ Preview editing (temporary prompt override via textarea overlay)
   - ✅ Custom canvas rendering
   - ✅ Edit/display mode toggling
   - ✅ Text wrapping and dynamic sizing
