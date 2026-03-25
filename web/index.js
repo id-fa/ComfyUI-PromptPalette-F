@@ -155,9 +155,9 @@ app.registerExtension({
     name: "PromptPalette_F",
 
     setup() {
-        // Patch api.queuePrompt to inject preview_override values
-        // directly into the prompt data before it's sent to the backend.
-        // This is the most reliable approach as it modifies data right before the HTTP request.
+        // Patch api.queuePrompt to inject widget values for Nodes 2.0 mode
+        // (widgets are removed from array to hide them, so ComfyUI can't serialize them)
+        // Also injects preview_override for Classic mode.
         const origQueuePrompt = api.queuePrompt.bind(api);
         api.queuePrompt = async function(number, { output, workflow }) {
             try {
@@ -166,6 +166,17 @@ app.registerExtension({
                         if (nodeData.class_type === "PromptPalette_F") {
                             const node = app.graph.getNodeById(parseInt(nodeId));
                             if (node) {
+                                // Nodes 2.0: inject all widget values from backed-up refs
+                                if (node._ppWidgetRefs) {
+                                    for (const [name, widget] of Object.entries(node._ppWidgetRefs)) {
+                                        if (widget && widget.value !== undefined) {
+                                            nodeData.inputs[name] = widget.value;
+                                        }
+                                    }
+                                    console.log("[PromptPalette_F] Injecting widget values for Nodes 2.0 node", nodeId);
+                                }
+
+                                // Inject preview override (both modes)
                                 const override = node._promptPalette_previewOverride;
                                 if (override && override.trim() !== "") {
                                     nodeData.inputs.preview_override = override;
@@ -176,7 +187,7 @@ app.registerExtension({
                     }
                 }
             } catch (e) {
-                console.error("[PromptPalette_F] Error injecting preview override:", e);
+                console.error("[PromptPalette_F] Error injecting widget values:", e);
             }
             return origQueuePrompt(number, { output, workflow });
         };
@@ -379,7 +390,7 @@ app.registerExtension({
                     this._promptPalette_nodes2HelpWidget2.hidden = true;
                 }
             } else {
-                // Nodes 2.0 mode: Remove buttons if they exist
+                // Nodes 2.0 mode: Remove Classic buttons if they exist
                 if (this._promptPalette_editButton || this._promptPalette_previewButton) {
                     if (this.widgets) {
                         this.widgets = this.widgets.filter(w => {
@@ -391,18 +402,17 @@ app.registerExtension({
                     this._promptPalette_editButton = null;
                     this._promptPalette_previewButton = null;
                     this._promptPalette_spacer = null;
-                    // Force node size recalculation after removing buttons
                     this.setSize(this.computeSize());
                 }
-                // Show warning widgets
+                // Hide warning widgets (DOM Widget replaces them)
                 if (this._promptPalette_nodes2Widget) {
-                    this._promptPalette_nodes2Widget.hidden = false;
+                    this._promptPalette_nodes2Widget.hidden = true;
                 }
                 if (this._promptPalette_nodes2HelpWidget1) {
-                    this._promptPalette_nodes2HelpWidget1.hidden = false;
+                    this._promptPalette_nodes2HelpWidget1.hidden = true;
                 }
                 if (this._promptPalette_nodes2HelpWidget2) {
-                    this._promptPalette_nodes2HelpWidget2.hidden = false;
+                    this._promptPalette_nodes2HelpWidget2.hidden = true;
                 }
             }
         };
@@ -414,7 +424,7 @@ app.registerExtension({
                 if (!this._promptPalette_setupDone) {
                     // onDrawForeground was never called - we're in Nodes 2.0 mode
                     console.log("[PromptPalette_F] Nodes 2.0 mode detected (onDrawForeground not called)");
-                    console.warn("[PromptPalette_F] Advanced features (preview, groups, weights, checkboxes) require Classic mode");
+                    console.log("[PromptPalette_F] Using DOM Widget UI for Nodes 2.0 mode");
                     window.__PromptPalette_F_Mode = 'nodes2';
 
                     // Remove Classic mode buttons if they exist (from previous Classic mode session)
@@ -424,40 +434,58 @@ app.registerExtension({
                                    w !== this._promptPalette_previewButton &&
                                    w !== this._promptPalette_spacer;
                         });
-                        // Clear the references
                         this._promptPalette_editButton = null;
                         this._promptPalette_previewButton = null;
                         this._promptPalette_spacer = null;
                     }
 
-                    // Show Nodes 2.0 warning widgets
-                    if (this._promptPalette_nodes2Widget) {
-                        this._promptPalette_nodes2Widget.hidden = false;
+                    // Remove warning widgets from array (hidden property unreliable in Nodes 2.0)
+                    if (this.widgets) {
+                        const removeSet = new Set([
+                            this._promptPalette_nodes2Widget,
+                            this._promptPalette_nodes2HelpWidget1,
+                            this._promptPalette_nodes2HelpWidget2,
+                        ].filter(Boolean));
+                        this.widgets = this.widgets.filter(w => !removeSet.has(w));
                     }
-                    if (this._promptPalette_nodes2HelpWidget1) {
-                        this._promptPalette_nodes2HelpWidget1.hidden = false;
-                    }
-                    if (this._promptPalette_nodes2HelpWidget2) {
-                        this._promptPalette_nodes2HelpWidget2.hidden = false;
+                    this._promptPalette_nodes2Widget = null;
+                    this._promptPalette_nodes2HelpWidget1 = null;
+                    this._promptPalette_nodes2HelpWidget2 = null;
+
+                    // Remove standard widgets from array (hidden property doesn't work in Nodes 2.0)
+                    // Store references in _ppWidgetRefs so DOM UI and queuePrompt patch can access values
+                    const textWidget = findTextWidget(this);
+                    const separatorWidget = findSeparatorWidget(this);
+                    const newlineWidget = findNewlineWidget(this);
+                    const separatorNewlineWidget = findSeparatorNewlineWidget(this);
+                    const trailingSeparatorWidget = findTrailingSeparatorWidget(this);
+                    const overrideWidgetNodes2 = findOverrideWidget(this);
+
+                    this._ppWidgetRefs = {
+                        text: textWidget,
+                        separator: separatorWidget,
+                        add_newline: newlineWidget,
+                        separator_newline: separatorNewlineWidget,
+                        trailing_separator: trailingSeparatorWidget,
+                        preview_override: overrideWidgetNodes2,
+                    };
+
+                    if (this.widgets) {
+                        const removeSet = new Set([
+                            textWidget, separatorWidget, newlineWidget,
+                            separatorNewlineWidget, trailingSeparatorWidget,
+                            overrideWidgetNodes2,
+                        ].filter(Boolean));
+                        this.widgets = this.widgets.filter(w => !removeSet.has(w));
                     }
 
-                    // Show all input widgets for Nodes 2.0 mode
-                    const textWidget = findTextWidget(this);
-                    if (textWidget) textWidget.hidden = false;
-                    const separatorWidget = findSeparatorWidget(this);
-                    if (separatorWidget) separatorWidget.hidden = false;
-                    const newlineWidget = findNewlineWidget(this);
-                    if (newlineWidget) newlineWidget.hidden = false;
-                    const separatorNewlineWidget = findSeparatorNewlineWidget(this);
-                    if (separatorNewlineWidget) separatorNewlineWidget.hidden = false;
-                    const trailingSeparatorWidget = findTrailingSeparatorWidget(this);
-                    if (trailingSeparatorWidget) trailingSeparatorWidget.hidden = false;
-                    // Keep override widget hidden in Nodes 2.0 mode
-                    const overrideWidgetNodes2 = findOverrideWidget(this);
-                    if (overrideWidgetNodes2) overrideWidgetNodes2.hidden = true;
+                    // Create DOM Widget UI for Nodes 2.0
+                    if (textWidget && !this._promptPalette_domWidget) {
+                        this._promptPalette_domWidget = setupNodes2DOMWidget(this, textWidget, app);
+                    }
 
                     // Force node size recalculation
-                    this.setSize(this.computeSize());
+                    this.setSize([Math.max(this.size[0], 350), this.computeSize()[1]]);
                     if (app.graph) {
                         app.graph.setDirtyCanvas(true, true);
                     }
@@ -554,64 +582,40 @@ app.registerExtension({
 // UI Control
 // ========================================
 
-function findTextWidget(node) {
+function findWidgetByName(node, name) {
+    // Check backed-up refs first (Nodes 2.0 removes widgets from array)
+    if (node._ppWidgetRefs && node._ppWidgetRefs[name]) {
+        return node._ppWidgetRefs[name];
+    }
     if (!node.widgets) return null;
     for (const w of node.widgets) {
-        if (w.name === "text") {
-            return w;
-        }
+        if (w.name === name) return w;
     }
     return null;
+}
+
+function findTextWidget(node) {
+    return findWidgetByName(node, "text");
 }
 
 function findSeparatorWidget(node) {
-    if (!node.widgets) return null;
-    for (const w of node.widgets) {
-        if (w.name === "separator") {
-            return w;
-        }
-    }
-    return null;
+    return findWidgetByName(node, "separator");
 }
 
 function findNewlineWidget(node) {
-    if (!node.widgets) return null;
-    for (const w of node.widgets) {
-        if (w.name === "add_newline") {
-            return w;
-        }
-    }
-    return null;
+    return findWidgetByName(node, "add_newline");
 }
 
 function findSeparatorNewlineWidget(node) {
-    if (!node.widgets) return null;
-    for (const w of node.widgets) {
-        if (w.name === "separator_newline") {
-            return w;
-        }
-    }
-    return null;
+    return findWidgetByName(node, "separator_newline");
 }
 
 function findTrailingSeparatorWidget(node) {
-    if (!node.widgets) return null;
-    for (const w of node.widgets) {
-        if (w.name === "trailing_separator") {
-            return w;
-        }
-    }
-    return null;
+    return findWidgetByName(node, "trailing_separator");
 }
 
 function findOverrideWidget(node) {
-    if (!node.widgets) return null;
-    for (const w of node.widgets) {
-        if (w.name === "preview_override") {
-            return w;
-        }
-    }
-    return null;
+    return findWidgetByName(node, "preview_override");
 }
 
 function addEditButton(node, textWidget, app) {
@@ -1482,6 +1486,706 @@ function expandHexColor(color) {
         return '#' + color[1] + color[1] + color[2] + color[2] + color[3] + color[3];
     }
     return color;
+}
+
+// ========================================
+// Nodes 2.0 DOM Widget UI
+// ========================================
+
+const DOM_CSS = `
+.pp-container {
+    font-family: monospace;
+    font-size: 13px;
+    color: var(--input-text, #ddd);
+    background: var(--comfy-input-bg, #222);
+    border: 1px solid var(--border-color, #4e4e4e);
+    border-radius: 6px;
+    overflow: hidden;
+    user-select: none;
+}
+.pp-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    padding: 4px 6px;
+    flex-wrap: wrap;
+    border-bottom: 1px solid var(--border-color, #4e4e4e);
+}
+.pp-toolbar button {
+    font-family: monospace;
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    border: 1px solid transparent;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.pp-btn-all {
+    background: #4CAF50; color: #fff;
+}
+.pp-btn-off {
+    background: #f44336; color: #fff;
+}
+.pp-btn-group {
+    border-color: var(--border-color, #4e4e4e) !important;
+}
+.pp-btn-group[data-status="all"] {
+    background: color-mix(in srgb, var(--input-text, #ddd) 70%, transparent);
+    color: var(--comfy-input-bg, #222);
+}
+.pp-btn-group[data-status="partial"] {
+    background: var(--comfy-input-bg, #222);
+    color: var(--input-text, #ddd);
+    border-color: color-mix(in srgb, var(--input-text, #ddd) 70%, transparent) !important;
+}
+.pp-btn-group[data-status="none"] {
+    background: transparent;
+    color: color-mix(in srgb, var(--input-text, #ddd) 40%, transparent);
+    border-color: var(--border-color, #4e4e4e) !important;
+}
+.pp-edit-toggle {
+    margin-left: auto;
+    background: var(--comfy-input-bg, #222);
+    color: var(--input-text, #ddd);
+    border-color: var(--border-color, #4e4e4e) !important;
+    font-size: 12px;
+    padding: 2px 10px;
+}
+.pp-phrases {
+    padding: 2px 0;
+}
+.pp-row {
+    display: flex;
+    align-items: center;
+    padding: 2px 6px;
+    gap: 6px;
+    min-height: 22px;
+    cursor: pointer;
+}
+.pp-row:hover {
+    background: color-mix(in srgb, var(--input-text, #ddd) 8%, transparent);
+}
+.pp-row.pp-inactive {
+    opacity: 0.45;
+}
+.pp-checkbox {
+    width: 14px;
+    height: 14px;
+    border-radius: 3px;
+    border: 1px solid color-mix(in srgb, var(--input-text, #ddd) 50%, transparent);
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 10px;
+}
+.pp-row:not(.pp-inactive) .pp-checkbox {
+    background: color-mix(in srgb, var(--input-text, #ddd) 70%, transparent);
+    color: var(--comfy-input-bg, #222);
+    border-color: transparent;
+}
+.pp-phrase-text {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-size: 13px;
+    line-height: 1.4;
+}
+.pp-phrase-text.pp-bold {
+    font-weight: bold;
+}
+.pp-desc {
+    padding: 1px 6px 0 26px;
+    font-style: italic;
+    font-size: 12px;
+    color: color-mix(in srgb, var(--input-text, #ddd) 50%, transparent);
+}
+.pp-weight-controls {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    flex-shrink: 0;
+}
+.pp-weight-btn {
+    width: 18px;
+    height: 18px;
+    border-radius: 3px;
+    border: none;
+    background: var(--comfy-input-bg, #222);
+    color: color-mix(in srgb, var(--input-text, #ddd) 60%, transparent);
+    font-size: 12px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    font-family: monospace;
+}
+.pp-weight-btn:hover {
+    background: color-mix(in srgb, var(--input-text, #ddd) 20%, transparent);
+}
+.pp-weight-label {
+    font-size: 11px;
+    min-width: 24px;
+    text-align: center;
+    color: color-mix(in srgb, var(--input-text, #ddd) 70%, transparent);
+}
+.pp-preview {
+    border-top: 1px solid var(--border-color, #4e4e4e);
+    padding: 4px 6px;
+    max-height: 100px;
+    overflow-y: auto;
+}
+.pp-preview-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 2px;
+}
+.pp-preview-label {
+    font-size: 11px;
+    color: var(--descrip-text, #999);
+}
+.pp-preview-label.pp-edited {
+    color: #ff9800;
+}
+.pp-preview-btns {
+    display: flex;
+    gap: 4px;
+}
+.pp-preview-btn {
+    font-family: monospace;
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    border: none;
+    cursor: pointer;
+}
+.pp-preview-btn.pp-edit-btn {
+    background: #4CAF5080;
+    color: #fff;
+}
+.pp-preview-btn.pp-reset-btn {
+    background: #f4433680;
+    color: #fff;
+}
+.pp-preview-text {
+    font-size: 12px;
+    line-height: 1.4;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: var(--input-text, #ddd);
+    min-height: 16px;
+}
+.pp-preview-text.pp-empty {
+    color: color-mix(in srgb, var(--input-text, #ddd) 40%, transparent);
+    font-style: italic;
+}
+.pp-preview.pp-has-override {
+    border-top-color: #ff9800;
+}
+.pp-edit-area {
+    padding: 4px 6px;
+}
+.pp-edit-area textarea {
+    width: 100%;
+    min-height: 120px;
+    font-family: monospace;
+    font-size: 13px;
+    background: var(--comfy-input-bg, #222);
+    color: var(--input-text, #ddd);
+    border: 1px solid var(--border-color, #4e4e4e);
+    border-radius: 4px;
+    padding: 4px 6px;
+    resize: vertical;
+    outline: none;
+    box-sizing: border-box;
+}
+.pp-edit-area textarea:focus {
+    border-color: color-mix(in srgb, var(--input-text, #ddd) 60%, transparent);
+}
+.pp-separator-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 6px;
+    font-size: 12px;
+    border-top: 1px solid var(--border-color, #4e4e4e);
+}
+.pp-separator-row label {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.pp-separator-row input[type="text"] {
+    width: 50px;
+    font-family: monospace;
+    font-size: 12px;
+    background: var(--comfy-input-bg, #222);
+    color: var(--input-text, #ddd);
+    border: 1px solid var(--border-color, #4e4e4e);
+    border-radius: 3px;
+    padding: 1px 4px;
+    outline: none;
+}
+.pp-no-text {
+    padding: 12px 6px;
+    text-align: center;
+    color: color-mix(in srgb, var(--input-text, #ddd) 40%, transparent);
+    font-style: italic;
+}
+`;
+
+function injectDOMCSS() {
+    if (document.getElementById('pp-dom-styles')) return;
+    const style = document.createElement('style');
+    style.id = 'pp-dom-styles';
+    style.textContent = DOM_CSS;
+    document.head.appendChild(style);
+}
+
+function createDOMWidget(node, textWidget, app) {
+    injectDOMCSS();
+
+    const container = document.createElement('div');
+    container.className = 'pp-container';
+
+    // State
+    node._ppDomEditMode = false;
+
+    function getWidgetValue(name) {
+        // Check backed-up refs first (widgets removed from array in Nodes 2.0)
+        const refs = node._ppWidgetRefs;
+        if (refs && refs[name]) return refs[name].value;
+        if (!node.widgets) return undefined;
+        for (const w of node.widgets) {
+            if (w.name === name) return w.value;
+        }
+        return undefined;
+    }
+
+    function setWidgetValue(name, val) {
+        const refs = node._ppWidgetRefs;
+        if (refs && refs[name]) { refs[name].value = val; return; }
+        if (!node.widgets) return;
+        for (const w of node.widgets) {
+            if (w.name === name) { w.value = val; return; }
+        }
+    }
+
+    function render() {
+        const text = textWidget.value || "";
+        container.innerHTML = '';
+
+        if (node._ppDomEditMode) {
+            renderEditMode(container, text);
+        } else {
+            renderDisplayMode(container, text);
+        }
+    }
+
+    function renderEditMode(el, text) {
+        // Toolbar with Save button
+        const toolbar = document.createElement('div');
+        toolbar.className = 'pp-toolbar';
+        const saveBtn = document.createElement('button');
+        saveBtn.className = 'pp-edit-toggle';
+        saveBtn.textContent = 'Save';
+        saveBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            // Read back textarea value
+            const ta = el.querySelector('.pp-edit-area textarea');
+            if (ta) textWidget.value = ta.value;
+            node._ppDomEditMode = false;
+            render();
+        });
+        toolbar.appendChild(saveBtn);
+        el.appendChild(toolbar);
+
+        // Textarea
+        const editArea = document.createElement('div');
+        editArea.className = 'pp-edit-area';
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.addEventListener('keydown', (e) => e.stopPropagation());
+        textarea.addEventListener('input', () => {
+            textWidget.value = textarea.value;
+        });
+        editArea.appendChild(textarea);
+        el.appendChild(editArea);
+
+        // Separator & options row
+        renderOptionsRow(el);
+    }
+
+    function renderOptionsRow(el) {
+        const row = document.createElement('div');
+        row.className = 'pp-separator-row';
+
+        // Separator input
+        const sepLabel = document.createElement('label');
+        sepLabel.textContent = 'Sep: ';
+        const sepInput = document.createElement('input');
+        sepInput.type = 'text';
+        sepInput.value = getWidgetValue('separator') !== undefined ? getWidgetValue('separator') : ', ';
+        sepInput.addEventListener('input', () => {
+            setWidgetValue('separator', sepInput.value);
+            renderPreviewSection();
+        });
+        sepInput.addEventListener('keydown', (e) => e.stopPropagation());
+        sepLabel.appendChild(sepInput);
+        row.appendChild(sepLabel);
+
+        // Checkboxes for options
+        const options = [
+            { name: 'trailing_separator', label: 'Trail' },
+            { name: 'separator_newline', label: 'Sep NL' },
+            { name: 'add_newline', label: 'End NL' },
+        ];
+        for (const opt of options) {
+            const label = document.createElement('label');
+            const cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.checked = !!getWidgetValue(opt.name);
+            cb.addEventListener('change', () => {
+                setWidgetValue(opt.name, cb.checked);
+                renderPreviewSection();
+            });
+            label.appendChild(cb);
+            label.appendChild(document.createTextNode(opt.label));
+            row.appendChild(label);
+        }
+
+        el.appendChild(row);
+    }
+
+    function renderPreviewSection() {
+        // Re-render just the preview area if it exists
+        const existing = container.querySelector('.pp-preview');
+        if (existing) {
+            const parent = existing.parentNode;
+            const newPreview = buildPreview();
+            parent.replaceChild(newPreview, existing);
+        }
+    }
+
+    function renderDisplayMode(el, text) {
+        const lines = text.split('\n');
+        const groups = getAllGroups(text);
+
+        // Toolbar with group buttons + Edit button
+        const toolbar = document.createElement('div');
+        toolbar.className = 'pp-toolbar';
+
+        if (groups.length > 0) {
+            // All ON button
+            const allBtn = document.createElement('button');
+            allBtn.className = 'pp-btn-all';
+            allBtn.textContent = '[all]';
+            allBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                textWidget.value = toggleAllPhrases(textWidget.value, true);
+                setPreviewOverride(node, "");
+                render();
+            });
+            toolbar.appendChild(allBtn);
+
+            // All OFF button
+            const offBtn = document.createElement('button');
+            offBtn.className = 'pp-btn-off';
+            offBtn.textContent = '[off]';
+            offBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                textWidget.value = toggleAllPhrases(textWidget.value, false);
+                setPreviewOverride(node, "");
+                render();
+            });
+            toolbar.appendChild(offBtn);
+
+            // Group buttons
+            for (const groupName of groups) {
+                const status = getGroupStatus(text, groupName);
+                const gBtn = document.createElement('button');
+                gBtn.className = 'pp-btn-group';
+                gBtn.dataset.status = status;
+                gBtn.textContent = `[${groupName}]`;
+                gBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    textWidget.value = toggleGroup(textWidget.value, groupName);
+                    setPreviewOverride(node, "");
+                    render();
+                });
+                toolbar.appendChild(gBtn);
+            }
+        }
+
+        // Edit button (always)
+        const editBtn = document.createElement('button');
+        editBtn.className = 'pp-edit-toggle';
+        editBtn.textContent = 'Edit';
+        editBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            node._ppDomEditMode = true;
+            render();
+        });
+        toolbar.appendChild(editBtn);
+
+        el.appendChild(toolbar);
+
+        // Phrase list
+        const phrasesDiv = document.createElement('div');
+        phrasesDiv.className = 'pp-phrases';
+
+        let hasContent = false;
+        lines.forEach((line, index) => {
+            if (isEmptyLine(line)) return;
+
+            // Description comment
+            if (isDescriptionComment(line)) {
+                // Don't render standalone - handled by the next phrase line
+                return;
+            }
+
+            hasContent = true;
+            const isCommented = line.trim().startsWith('//');
+
+            // Check for description above this line
+            const description = findDescriptionForLine(lines, index);
+            if (description) {
+                const descEl = document.createElement('div');
+                descEl.className = 'pp-desc';
+                descEl.textContent = description;
+                phrasesDiv.appendChild(descEl);
+            }
+
+            // Phrase row
+            const row = document.createElement('div');
+            row.className = 'pp-row' + (isCommented ? ' pp-inactive' : '');
+
+            // Checkbox
+            const checkbox = document.createElement('div');
+            checkbox.className = 'pp-checkbox';
+            checkbox.textContent = isCommented ? '' : '\u2713';
+            row.appendChild(checkbox);
+
+            // Phrase text
+            const phraseText = getPhraseText(line, isCommented);
+            const textToCheck = isCommented ?
+                (line.match(/^(\s*\/\/\s*)(.*)/)?.[2] || '') : line;
+            const weight = parseWeight(textToCheck);
+            const isBold = weight !== 1.0;
+
+            const textEl = document.createElement('span');
+            textEl.className = 'pp-phrase-text' + (isBold ? ' pp-bold' : '');
+            textEl.textContent = phraseText;
+            row.appendChild(textEl);
+
+            // Weight controls
+            const weightControls = document.createElement('div');
+            weightControls.className = 'pp-weight-controls';
+
+            const minusBtn = document.createElement('button');
+            minusBtn.className = 'pp-weight-btn';
+            minusBtn.textContent = '\u2212';
+            minusBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                adjustWeightInText(textWidget, index, -0.1, app);
+                setPreviewOverride(node, "");
+                render();
+            });
+            weightControls.appendChild(minusBtn);
+
+            const weightLabel = document.createElement('span');
+            weightLabel.className = 'pp-weight-label';
+            weightLabel.textContent = getWeightText(textToCheck) || '1.0';
+            weightControls.appendChild(weightLabel);
+
+            const plusBtn = document.createElement('button');
+            plusBtn.className = 'pp-weight-btn';
+            plusBtn.textContent = '+';
+            plusBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                adjustWeightInText(textWidget, index, 0.1, app);
+                setPreviewOverride(node, "");
+                render();
+            });
+            weightControls.appendChild(plusBtn);
+
+            row.appendChild(weightControls);
+
+            // Click on row toggles comment
+            row.addEventListener('click', (e) => {
+                if (e.target.closest('.pp-weight-btn')) return;
+                const textLines = textWidget.value.split('\n');
+                toggleCommentOnLine(textLines, index);
+                textWidget.value = textLines.join('\n');
+                setPreviewOverride(node, "");
+                render();
+            });
+
+            phrasesDiv.appendChild(row);
+        });
+
+        if (!hasContent) {
+            const noText = document.createElement('div');
+            noText.className = 'pp-no-text';
+            noText.textContent = 'No Text';
+            phrasesDiv.appendChild(noText);
+        }
+
+        el.appendChild(phrasesDiv);
+
+        // Preview area
+        el.appendChild(buildPreview());
+    }
+
+    function buildPreview() {
+        const previewDiv = document.createElement('div');
+        const hasOverride = getPreviewOverride(node) !== "";
+        previewDiv.className = 'pp-preview' + (hasOverride ? ' pp-has-override' : '');
+
+        // Header
+        const header = document.createElement('div');
+        header.className = 'pp-preview-header';
+
+        const label = document.createElement('span');
+        label.className = 'pp-preview-label' + (hasOverride ? ' pp-edited' : '');
+        label.textContent = hasOverride ? 'Preview (Edited):' : 'Preview:';
+        header.appendChild(label);
+
+        const btns = document.createElement('div');
+        btns.className = 'pp-preview-btns';
+
+        if (hasOverride) {
+            const resetBtn = document.createElement('button');
+            resetBtn.className = 'pp-preview-btn pp-reset-btn';
+            resetBtn.textContent = '\u21BA Reset';
+            resetBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                setPreviewOverride(node, "");
+                render();
+            });
+            btns.appendChild(resetBtn);
+        }
+
+        const editBtn = document.createElement('button');
+        editBtn.className = 'pp-preview-btn pp-edit-btn';
+        editBtn.textContent = '\u270E Edit';
+        editBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            openDOMPreviewEditor(node, render);
+        });
+        btns.appendChild(editBtn);
+
+        header.appendChild(btns);
+        previewDiv.appendChild(header);
+
+        // Preview text
+        const previewText = hasOverride ? getPreviewOverride(node) : generatePreview(node);
+        const textEl = document.createElement('div');
+        if (!previewText || !previewText.trim()) {
+            textEl.className = 'pp-preview-text pp-empty';
+            textEl.textContent = '(empty)';
+        } else {
+            textEl.className = 'pp-preview-text';
+            textEl.textContent = previewText;
+        }
+        previewDiv.appendChild(textEl);
+
+        return previewDiv;
+    }
+
+    function openDOMPreviewEditor(node, renderCallback) {
+        const currentOverride = getPreviewOverride(node);
+        const previewText = currentOverride || generatePreview(node);
+
+        // Replace preview with editable textarea inline
+        const previewEl = container.querySelector('.pp-preview');
+        if (!previewEl) return;
+
+        previewEl.innerHTML = '';
+        previewEl.className = 'pp-preview pp-has-override';
+        previewEl.style.maxHeight = 'none';
+
+        const header = document.createElement('div');
+        header.className = 'pp-preview-header';
+        header.style.background = '#ff9800';
+        header.style.color = '#1a1a2e';
+        header.style.padding = '2px 6px';
+        header.style.borderRadius = '3px';
+        header.style.fontWeight = 'bold';
+        header.style.fontSize = '11px';
+        header.style.marginBottom = '4px';
+
+        const hint = document.createElement('span');
+        hint.textContent = 'Editing Preview \u2014 Esc: cancel';
+        header.appendChild(hint);
+
+        const saveBtn = document.createElement('button');
+        saveBtn.textContent = '\u2715 Save';
+        saveBtn.style.cssText = 'cursor:pointer;padding:1px 6px;border-radius:3px;background:rgba(0,0,0,0.15);border:none;color:#1a1a2e;font-size:11px;margin-left:auto;font-family:monospace;';
+        header.appendChild(saveBtn);
+        header.style.display = 'flex';
+        header.style.justifyContent = 'space-between';
+        header.style.alignItems = 'center';
+
+        previewEl.appendChild(header);
+
+        const textarea = document.createElement('textarea');
+        textarea.value = previewText;
+        textarea.style.cssText = 'width:100%;min-height:80px;font-family:monospace;font-size:12px;background:var(--comfy-input-bg,#222);color:var(--input-text,#ddd);border:1px solid #ff9800;border-radius:3px;padding:4px 6px;resize:vertical;outline:none;box-sizing:border-box;';
+        textarea.addEventListener('keydown', (e) => {
+            e.stopPropagation();
+            if (e.key === 'Escape') {
+                renderCallback();
+            }
+        });
+
+        previewEl.appendChild(textarea);
+        setTimeout(() => { textarea.focus(); textarea.select(); }, 10);
+
+        saveBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            setPreviewOverride(node, textarea.value);
+            renderCallback();
+        });
+    }
+
+    // Initial render
+    render();
+
+    // Store render function on node for external updates
+    node._ppDomRender = render;
+
+    return { container, render };
+}
+
+function setupNodes2DOMWidget(node, textWidget, app) {
+    const { container, render } = createDOMWidget(node, textWidget, app);
+
+    const domWidget = node.addDOMWidget("pp_dom_ui", "custom", container, {
+        hideOnZoom: false,
+        serialize: false,
+        getValue: () => textWidget.value,
+        setValue: (v) => {
+            textWidget.value = v;
+            render();
+        },
+        getMinHeight: () => 200,
+        getHeight: () => {
+            // Dynamic height based on content
+            return Math.max(200, container.scrollHeight + 10);
+        },
+    });
+
+    domWidget.computeSize = (width) => {
+        return [width, Math.max(200, container.scrollHeight + 10)];
+    };
+
+    return domWidget;
 }
 
 // ========================================

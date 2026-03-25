@@ -39,7 +39,7 @@ The project follows ComfyUI's custom node structure with V3 API compliance and d
 
 **Frontend (Adaptive Dual Mode) - `web/index.js`:**
 - **Classic Mode (LiteGraph.js)**: Full feature support with canvas rendering
-- **Nodes 2.0 Mode (Vue.js)**: Basic support - text editing only, advanced features disabled
+- **Nodes 2.0 Mode (Vue.js)**: Full feature support via DOM Widget (HTML/CSS-based interactive UI)
 - **Adaptive Mode Detection**: Uses `onDrawForeground` callback invocation as mode indicator
   - If `onDrawForeground` called → Classic mode (canvas rendering works)
   - If `onDrawForeground` not called after 100ms → Nodes 2.0 mode (canvas rendering unavailable)
@@ -77,25 +77,28 @@ The project follows ComfyUI's custom node structure with V3 API compliance and d
      - `onNodeCreated`: Sets up both Classic and Nodes 2.0 features initially
        - Initializes `_promptPalette_drawCalled` and `_promptPalette_setupDone` flags
        - Stores reference to text widget for later button creation
-       - Creates 3 Nodes 2.0 warning widgets (hidden initially):
-         - "⚠️ Nodes 2.0 Mode" (status indicator)
-         - "Use // to toggle lines" (usage instruction)
-         - "Switch to Classic for full UI" (feature availability)
+       - Creates 3 Nodes 2.0 warning widgets (hidden initially, removed later in Nodes 2.0)
      - `onDrawForeground`: Canvas rendering callback - ONLY invoked in Classic mode
        - Sets `_promptPalette_foregroundDrawnThisFrame` flag for mode detection
        - When called first time: Creates Edit/Hide Preview buttons, marks as Classic mode
        - Performs custom canvas drawing for checkboxes, groups, weights, preview
      - `onDrawBackground`: Background rendering callback - works in both modes
        - Checks `_promptPalette_foregroundDrawnThisFrame` flag to detect current mode
-       - Dynamically shows/hides warning widgets based on mode
-       - Note: Button visibility control doesn't work without page reload
+       - Hides warning widgets in both modes (DOM Widget replaces them in Nodes 2.0)
      - `onAdded`: Delayed detection with 100ms timeout (fallback for initial detection)
-       - If `onDrawForeground` wasn't called: Marks as Nodes 2.0 mode, shows warning widgets
-       - Makes all input widgets visible (no custom edit mode in Nodes 2.0)
+       - If `onDrawForeground` wasn't called: Marks as Nodes 2.0 mode
+       - Removes warning widgets and standard widgets from `node.widgets` array
+       - Backs up widget references in `node._ppWidgetRefs` for value access
+       - Creates DOM Widget UI via `setupNodes2DOMWidget()`
    - **Why Adaptive Detection**:
      - `app.vueAppReady` is `true` in both Classic and Nodes 2.0 modes (unreliable)
      - `window.Vue` and `window.LiteGraph` checks are unreliable
      - Canvas callback invocation is the only reliable indicator
+   - **Nodes 2.0 Widget Hiding Strategy**:
+     - `widget.hidden = true` does NOT work in Nodes 2.0 Vue rendering
+     - Widgets must be removed from `node.widgets` array to hide them
+     - Removed widgets are backed up in `node._ppWidgetRefs` for read/write access
+     - `api.queuePrompt` patch injects all values from `_ppWidgetRefs` into prompt data at execution time
 
 3. **UI System**:
    - **Edit mode**: Shows standard multiline text widget, separator input, and newline options for direct editing
@@ -242,26 +245,29 @@ This project requires no build process or package management - it's a pure Comfy
    - Test source text change (checkbox toggle) → verify override auto-clears
    - Save/reload workflow → verify override does not persist
 
-#### Nodes 2.0 Mode Testing (Basic Support)
+#### Nodes 2.0 Mode Testing (DOM Widget UI)
 1. **Mode Verification**:
    - Enable Nodes 2.0 in ComfyUI settings (usually under Interface)
    - Open browser console, look for: `[PromptPalette_F] Nodes 2.0 mode detected (onDrawForeground not called)`
+   - Look for: `[PromptPalette_F] Using DOM Widget UI for Nodes 2.0 mode`
    - Check `window.__PromptPalette_F_Mode` returns `"nodes2"`
 
-2. **Basic Functionality**:
+2. **DOM Widget UI Functionality**:
    - Create PromptPalette-F node
-   - Verify warning widget is visible
-   - Test text input (multiline editing)
-   - Test all input parameters (separator, prefix, output options)
-   - Verify backend processing produces correct output
+   - Verify DOM Widget UI is displayed (HTML/CSS-based, not canvas)
+   - Verify no standard widgets (text, separator, etc.) are visible above the DOM UI
+   - Test checkbox clicking to toggle phrases ON/OFF
+   - Test weight +/- buttons for weight adjustment
+   - Test group buttons ([all], [off], individual groups) for batch toggling
+   - Test Edit button to switch to text editing mode
+   - Test separator and option controls in edit mode
+   - Test preview area displays correct output
+   - Test preview Edit/Reset functionality
+   - Execute workflow and verify correct output (no "Required input is missing" error)
 
-3. **Expected Limitations**:
-   - No Edit/Display mode toggle
-   - No interactive checkboxes
-   - No weight adjustment controls
-   - No group buttons
-   - No preview panel
-   - All features work through standard widget inputs only
+3. **Serialization Verification**:
+   - Check console for: `[PromptPalette_F] Injecting widget values for Nodes 2.0 node`
+   - Verify all widget values are correctly passed to backend via queuePrompt patch
 
 #### Mode Switching Testing
 1. **Classic → Nodes 2.0**:
@@ -316,24 +322,30 @@ This project requires no build process or package management - it's a pure Comfy
 
 ## Code Organization
 
-### web/index.js Structure (approx. 1,700+ lines):
+### web/index.js Structure (approx. 2,600+ lines):
 - **Imports**: `app` from ComfyUI app.js, `api` from ComfyUI api.js
 - **Configuration**: CONFIG object with UI constants, including widgetSpacing
 - **Group Parsing Functions**: Group tag extraction, status tracking, simplified toggle logic, global toggles
 - **Unified Extension Registration**: Single "PromptPalette_F" extension with adaptive mode detection
-  - `setup()`: Patches `api.queuePrompt` to inject preview override values into prompt data
+  - `setup()`: Patches `api.queuePrompt` to inject widget values (Nodes 2.0) and preview override (both modes)
   - `setupAdaptiveMode()`: Main setup function
-  - `onNodeCreated`: Initializes widgets for both modes, creates 3 warning widgets for Nodes 2.0
+  - `onNodeCreated`: Initializes widgets for both modes, creates warning widgets (removed later in Nodes 2.0)
   - `onDrawForeground`: Canvas rendering callback (Classic mode only) - creates buttons, draws UI
-  - `onDrawBackground`: Background rendering callback (both modes) - dynamic mode detection and widget visibility control
-  - `onAdded`: Delayed detection with 100ms timeout (fallback for initial Nodes 2.0 detection)
+  - `onDrawBackground`: Background rendering callback (both modes) - mode detection and widget management
+  - `onAdded`: Delayed detection with 100ms timeout - creates DOM Widget UI in Nodes 2.0 mode
 - **UI Control Functions**: Widget management, click handling, interaction (Classic mode only)
   - `addEditButton()`: Creates Edit and Hide Preview buttons (called in Classic mode only)
+  - `findWidgetByName()`: Unified widget lookup with `_ppWidgetRefs` fallback for Nodes 2.0
   - Button creation, text widget handling, separator controls
 - **Text Wrapping Utilities**: Dynamic widget height calculation, text wrapping, width calculation
 - **Drawing Functions**: Canvas rendering for checkboxes, phrases, group controls, weight buttons, clickable text areas (Classic mode only)
 - **Weight System**: Parsing, adjustment, formatting for `(text:weight)` notation
 - **Theme/Color System**: Dynamic theme integration, color caching
+- **Nodes 2.0 DOM Widget UI**: Full HTML/CSS-based interactive UI for Nodes 2.0 mode
+  - `DOM_CSS`: Complete CSS styles using ComfyUI theme variables
+  - `injectDOMCSS()`: One-time CSS injection into document head
+  - `createDOMWidget()`: Builds interactive UI (checkboxes, weights, groups, preview, edit mode)
+  - `setupNodes2DOMWidget()`: Registers DOM Widget via `addDOMWidget` with dynamic height
 - **Preview Override Functions**: `findOverrideWidget()`, `setPreviewOverride()`, `getPreviewOverride()`, `openPreviewEditor()` (HTML textarea overlay with toolbar)
 - **Preview System**: Preview generation, rendering, scrolling, edit/reset buttons (Classic mode only)
 - **Entry Point**: Extension registration
@@ -372,6 +384,16 @@ This project includes `pyproject.toml` for ComfyUI registry publication followin
 - **Repository**: https://github.com/id-fa/ComfyUI-PromptPalette-F
 
 ## Development Status
+
+### Recent Changes (March 25, 2026)
+- ✅ **Nodes 2.0 DOM Widget UI**: Full interactive UI for Nodes 2.0 mode via `addDOMWidget`
+  - Replaced warning-only widgets with complete HTML/CSS-based interactive UI
+  - Features: checkboxes, weight +/- controls, group toggle buttons, preview panel, edit mode
+  - CSS uses ComfyUI theme variables (`var(--input-text)`, `var(--comfy-input-bg)`, etc.)
+  - Widget hiding: Removes widgets from `node.widgets` array (since `hidden=true` doesn't work in Vue)
+  - Serialization: `api.queuePrompt` patch extended to inject all widget values from `node._ppWidgetRefs`
+  - Key functions: `createDOMWidget()`, `setupNodes2DOMWidget()`, `DOM_CSS`, `injectDOMCSS()`
+  - Mode switching requires page reload (accepted limitation)
 
 ### Recent Changes (February 9, 2026)
 - ✅ **Preview edit feature**: Added temporary prompt editing via preview area
@@ -423,23 +445,21 @@ This project includes `pyproject.toml` for ComfyUI registry publication followin
 - ✅ Weight controls: +/- buttons for weight adjustment
 - ✅ Edit/Display modes: Toggle between text editing and interactive UI
 
-#### Nodes 2.0 Mode (Vue.js): ⚠️ Basic Support Only (Phase 2A Complete)
+#### Nodes 2.0 Mode (Vue.js): ✅ Full Support via DOM Widget (Phase 2B Complete)
 - ✅ **Adaptive mode detection**: Based on `onDrawForeground` callback invocation
-  - Tested and working correctly in both Classic and Nodes 2.0 environments
-  - Fixes issue where `app.vueAppReady` is true in both modes
-- ✅ **Text editing**: All input widgets visible and functional
+- ✅ **DOM Widget UI**: Full interactive HTML/CSS-based UI via `addDOMWidget`
+  - Interactive checkboxes for phrase toggling
+  - Weight adjustment controls (+/- buttons with weight display)
+  - Group management buttons ([all]/[off] + individual group toggles)
+  - Edit/Display mode toggling (Edit button switches to textarea + options)
+  - Live preview panel with Edit/Reset functionality
+  - Description comments displayed as italic text above phrases
+- ✅ **Theme integration**: CSS variables (`var(--input-text)`, etc.) for ComfyUI theme support
+- ✅ **Widget hiding strategy**: Widgets removed from `node.widgets` array (since `hidden=true` doesn't work in Vue)
+  - References backed up in `node._ppWidgetRefs`
+  - `api.queuePrompt` patch injects all values at execution time
 - ✅ **Backend processing**: Full text processing (same as Classic mode)
-- ✅ **Warning display**: Shows limitation notice to users (3 separate widgets)
-  - "⚠️ Nodes 2.0 Mode"
-  - "Use // to toggle lines" (explains comment-based toggling)
-  - "Switch to Classic for full UI" (directs users to full features)
-- ⚠️ **Visual issues**: Edit/Hide Preview buttons remain visible (non-functional), empty text fields appear
-- ❌ **Advanced features**: Not available (Phase 2B - waiting for ComfyUI Vue API documentation)
-  - Interactive checkboxes
-  - Weight adjustment controls
-  - Group management buttons
-  - Live preview panel
-  - Edit/display mode toggling
+- ⚠️ **Mode switching**: Requires page reload when switching between Classic and Nodes 2.0
 
 ## Known Issues
 
@@ -451,47 +471,25 @@ This project includes `pyproject.toml` for ComfyUI registry publication followin
 - **Status**: Under investigation, may be ComfyUI core issue
 - **Code Location**: `__init__.py:1-5`, `nodes.py:157-173`
 
-### Warning Widget Text Wrapping in Nodes 2.0 Mode (Partially Resolved)
-- **Issue**: Single multiline text widget doesn't wrap text properly in Nodes 2.0 mode
-- **Original Text**: "⚠️ Limited Support" / "Advanced features require Classic mode.\nSwitch in ComfyUI settings."
-- **Attempted Fix 1**: Changed to shorter multi-line text (not effective - newlines ignored)
-- **Attempted Fix 2**: Split into 3 separate text widgets (partially effective)
-  - Widget 1: "⚠️ Nodes 2.0 Mode"
-  - Widget 2: "Use // to toggle lines"
-  - Widget 3: "Switch to Classic for full UI"
-- **Remaining Issue**: Empty text fields appear alongside the warning widgets
-- **Impact**: Minor UX issue - warning message now readable but with extra visual clutter
-- **Status**: Acceptable workaround implemented, further improvements possible
-- **Code Location**: `web/index.js:201-233`
+### Widget Visibility in Nodes 2.0 Mode (Resolved - March 2026)
+- **Issue**: `widget.hidden = true` does not work in Nodes 2.0 Vue rendering for any widget type
+- **Root Cause**: Vue rendering ignores LiteGraph's `hidden` property on widget objects
+- **Solution**: Remove widgets from `node.widgets` array entirely, back up references in `node._ppWidgetRefs`, inject values via `api.queuePrompt` patch
+- **Status**: ✅ Resolved
 
-### Mode Detection Reliability (Partially Resolved)
-- **Issue**: Traditional mode detection methods are unreliable
-- **Problems Found**:
-  - `app.vueAppReady` is `true` in both Classic and Nodes 2.0 modes
-  - `window.Vue` and `window.LiteGraph` presence checks are inconsistent
-  - `app.ui.settings.getSettingValue('Comfy.UseNewUI')` not reliable
-- **Solution**: Implemented adaptive detection using `onDrawForeground` callback invocation
-  - Classic mode: `onDrawForeground` is called by LiteGraph.js rendering system
-  - Nodes 2.0 mode: `onDrawForeground` is never called by Vue.js rendering system
-- **Status**: ✅ Working correctly with adaptive detection
-- **Code Location**: `web/index.js:159-244`
-
-### Classic Mode Button Visibility in Nodes 2.0 Mode (Unresolved)
-- **Issue**: Edit and Hide Preview buttons remain visible when switching from Classic to Nodes 2.0 mode without page reload
-- **Context**: ComfyUI allows dynamic mode switching without page reload (layer switching, not full reload)
-- **Root Cause**: Button widgets' `hidden` property doesn't work properly in Nodes 2.0 mode (unlike text widgets)
-- **Attempted Solutions**:
-  1. Setting `widget.hidden = true` - doesn't hide button widgets
-  2. Using `computeSize()` to return `[0, 0]` - not invoked dynamically
-  3. Removing from `node.widgets` array in `onDrawBackground` - doesn't update UI without reload
-  4. Dynamic creation/deletion in `onDrawBackground` - doesn't update UI without reload
+### Mode Switching Display (Accepted Limitation)
+- **Issue**: Display becomes inconsistent when switching between Classic and Nodes 2.0 modes without page reload
 - **Current Behavior**:
-  - With page reload: Buttons correctly hidden/shown based on mode ✅
-  - Without page reload: Buttons from previous mode remain visible ❌
-- **Impact**: Minor UX issue - buttons are visible but non-functional in Nodes 2.0 mode
-- **Decision**: Issue accepted as limitation of Vue.js rendering system
-- **Status**: Will not fix - workaround requires page reload
-- **Code Location**: `web/index.js:314-373` (attempted `onDrawBackground` solution)
+  - With page reload: Both modes display correctly ✅
+  - Without page reload: UI from previous mode may remain or overlap ❌
+- **Impact**: Minor UX issue
+- **Decision**: Accepted as limitation - users must reload page when switching modes
+- **Status**: Will not fix
+
+### Mode Detection Reliability (Resolved)
+- **Issue**: Traditional mode detection methods are unreliable
+- **Solution**: Implemented adaptive detection using `onDrawForeground` callback invocation
+- **Status**: ✅ Working correctly with adaptive detection
 
 ## Fixed Issues
 
@@ -577,29 +575,25 @@ This project includes `pyproject.toml` for ComfyUI registry publication followin
   - ✅ Text wrapping and dynamic sizing
   - ✅ Theme-aware color system
 
-#### Nodes 2.0 Mode (Vue.js) - Basic Support ⚠️
-- **Status**: Minimal implementation (Phase 2A complete)
+#### Nodes 2.0 Mode (Vue.js) - Full Support via DOM Widget ✅
+- **Status**: Full implementation via `addDOMWidget` (Phase 2B complete)
 - **Compatibility**: ComfyUI v0.3.76+ with Nodes 2.0 enabled
-- **Supported Features**:
-  - ✅ Text editing (multiline input)
-  - ✅ All input parameters (separator, prefix, output options)
+- **Features** (all via HTML/CSS DOM Widget):
+  - ✅ Interactive checkboxes for phrase toggling
+  - ✅ Weight adjustment controls (+/- buttons)
+  - ✅ Group management buttons ([all]/[off] + individual groups)
+  - ✅ Edit/display mode toggling
+  - ✅ Live preview panel with Edit/Reset
+  - ✅ Separator and output option controls (in edit mode)
+  - ✅ Description comment display
+  - ✅ Theme integration via CSS variables
   - ✅ Backend text processing (same as Classic mode)
-- **Unavailable Features** (require Classic mode):
-  - ⚠️ Interactive checkboxes
-  - ⚠️ Weight adjustment controls
-  - ⚠️ Group management buttons
-  - ⚠️ Live preview panel
-  - ⚠️ Custom canvas rendering
-  - ⚠️ Edit/display mode toggling
 
 **User Guidance:**
-- Node displays 3 warning widgets in Nodes 2.0 mode:
-  - "⚠️ Nodes 2.0 Mode" (status indicator)
-  - "Use // to toggle lines" (explains comment-based phrase toggling)
-  - "Switch to Classic for full UI" (directs to full feature set)
+- Node displays full interactive DOM Widget UI in Nodes 2.0 mode
 - Users can toggle between Classic and Nodes 2.0 modes in ComfyUI settings
 - **Important**: After switching modes, reload the page for proper UI update
-  - Without reload: Buttons from previous mode may remain visible (but non-functional)
+  - Without reload: UI from previous mode may overlap or display incorrectly
   - With reload: UI correctly reflects current mode
 - Mode selection automatically detected and logged to console
 
@@ -613,24 +607,24 @@ The extension uses an **adaptive detection approach** that determines the render
 1. **Node Creation** (`onNodeCreated`): Sets up features for both modes initially
    - Creates all widgets (hidden by default)
    - Initializes detection flags: `_promptPalette_drawCalled`, `_promptPalette_setupDone`
-   - Creates 3 warning widgets for Nodes 2.0 mode
+   - Creates 3 warning widgets for Nodes 2.0 mode (removed later when DOM Widget is created)
    - Stores text widget reference for later button creation
 
 2. **Canvas Drawing** (`onDrawForeground`): Only invoked in Classic mode
    - Sets `_promptPalette_foregroundDrawnThisFrame` flag
    - If called first time → Creates Edit/Hide Preview buttons, marks as Classic mode
-   - Hides Nodes 2.0 warning widgets
    - Performs custom canvas drawing
    - Sets `window.__PromptPalette_F_Mode = 'classic'`
 
-3. **Background Drawing** (`onDrawBackground`): Invoked in both modes (attempted dynamic mode switching)
+3. **Background Drawing** (`onDrawBackground`): Invoked in both modes
    - Checks `_promptPalette_foregroundDrawnThisFrame` flag to detect current mode
-   - Shows/hides warning widgets based on mode
-   - Note: Button visibility control doesn't work without page reload (Vue.js limitation)
+   - Hides warning widgets in both modes (DOM Widget replaces them in Nodes 2.0)
 
 4. **Delayed Detection** (`onAdded`): Checks after 100ms timeout (fallback for initial detection)
    - If `onDrawForeground` wasn't called → Marks as Nodes 2.0 mode
-   - Shows warning widgets, makes input widgets visible
+   - Removes warning widgets and standard widgets from `node.widgets` array
+   - Backs up widget references in `node._ppWidgetRefs`
+   - Creates DOM Widget UI via `setupNodes2DOMWidget()`
    - Sets `window.__PromptPalette_F_Mode = 'nodes2'`
 
 **Why Adaptive Detection**:
@@ -720,11 +714,11 @@ This section documents the V3 API and Nodes 2.0 migration process, including err
 - **Implementation**: Single `beforeRegisterNodeDef` with adaptive callbacks
 - **Trade-off**: Slightly more complex callback logic, but cleaner overall structure
 
-**5. Minimal Nodes 2.0 Support (Phase 2A)**
-- **Decision**: Implement basic text editing only, defer advanced features to Phase 2B
-- **Rationale**: No official Vue widget API documentation available yet
-- **Implementation**: Warning widget + visible input widgets, no custom UI
-- **Trade-off**: Limited features in Nodes 2.0, but users can still use the node for basic tasks
+**5. DOM Widget for Nodes 2.0 (Phase 2B)**
+- **Decision**: Use `addDOMWidget` with HTML/CSS UI instead of waiting for official Vue widget API
+- **Rationale**: No official Vue widget API documentation available; `addDOMWidget` works in both modes and requires no build process
+- **Implementation**: `createDOMWidget()` builds complete interactive UI as HTML elements; widgets removed from array and values injected via `api.queuePrompt` patch
+- **Trade-off**: DOM widgets have known zoom-visibility issues, but provides full feature parity now
 
 **6. Preserve All Classic Mode Features**
 - **Decision**: Keep all existing canvas-rendering code unchanged
@@ -734,20 +728,11 @@ This section documents the V3 API and Nodes 2.0 migration process, including err
 
 ### Future Roadmap
 
-**Phase 2B: Full Nodes 2.0 Support** (Planned)
-- Waiting for ComfyUI Vue widget API documentation
-- Will implement Vue.js components for:
-  - Interactive checkboxes
-  - Weight controls
-  - Group buttons
-  - Preview panel
-- Target: Feature parity between Classic and Nodes 2.0 modes
-
 **Potential Improvements**:
-- Fix warning widget text wrapping in Nodes 2.0 mode
 - Investigate V3 web_directory issue with ComfyUI team
 - Switch to full V3 entry point when web_directory is fixed
-- Consider custom Vue.js widget implementation when API is documented
+- Consider migrating DOM Widget to official Vue widget API when documented
+- Investigate DOM widget zoom-visibility behavior in Nodes 2.0
 
 **References:**
 - [ComfyUI V3 Migration Guide](https://docs.comfy.org/custom-nodes/v3_migration)
