@@ -317,6 +317,7 @@ This project requires no build process or package management - it's a pure Comfy
 - **Row selection**: Entire phrase text area is clickable for toggling (excluding weight controls on right edge)
 - **Preview override**: Temporary edit stored on `node._promptPalette_previewOverride`, injected into prompt via `api.queuePrompt` patch, auto-cleared on source text change
 - **HTML overlay pattern**: `openPreviewEditor()` creates `position: fixed` container with toolbar + textarea, uses canvas coordinate transform for positioning, manages focus with `setTimeout` delays to avoid LiteGraph interference
+- **Reload Node recovery**: Initial workflow state snapshotted on first `configure()` into `app.graph._ppInitialStates[nodeId]`. Because ComfyUI's Reload Node assigns a **new id** to the recreated instance, a `onRemoved` → `onAdded` bridge (`app.graph._ppPendingReload`) transfers the saved state and re-keys it under the new id. Graph-level state cleared via patched `LGraph.prototype.clear` on workflow switch.
 - **State management**: Node tracks edit mode, clickable areas, widget visibility, text wrapping, and preview override
 - **Canvas redrawing**: Triggered via `app.graph.setDirtyCanvas(true)` after state changes
 
@@ -332,7 +333,9 @@ This project requires no build process or package management - it's a pure Comfy
   - `onNodeCreated`: Initializes widgets for both modes, creates warning widgets (removed later in Nodes 2.0)
   - `onDrawForeground`: Canvas rendering callback (Classic mode only) - creates buttons, draws UI
   - `onDrawBackground`: Background rendering callback (both modes) - mode detection and widget management
-  - `onAdded`: Delayed detection with 100ms timeout - creates DOM Widget UI in Nodes 2.0 mode
+  - `onAdded`: (1) `setTimeout(0)` Reload Node recovery — restores initial state from `_ppPendingReload` if set within 500ms; (2) 100ms delayed Nodes 2.0 detection — creates DOM Widget UI
+  - `onRemoved`: Captures the node's saved initial state into `app.graph._ppPendingReload` so the next new instance (Reload Node assigns a new id) can inherit it
+  - `configure()`: Snapshots first-time `info` into `app.graph._ppInitialStates[nodeId]` (only on workflow load, not on subsequent edits) for later Reload Node recovery
 - **UI Control Functions**: Widget management, click handling, interaction (Classic mode only)
   - `addEditButton()`: Creates Edit and Hide Preview buttons (called in Classic mode only)
   - `findWidgetByName()`: Unified widget lookup with `_ppWidgetRefs` fallback for Nodes 2.0
@@ -384,6 +387,18 @@ This project includes `pyproject.toml` for ComfyUI registry publication followin
 - **Repository**: https://github.com/id-fa/ComfyUI-PromptPalette-F
 
 ## Development Status
+
+### Recent Changes (April 18, 2026)
+- ✅ **Reload Node recovery**: On right-click → Reload Node, the node now reverts to the state at workflow-open time instead of losing all Edit content
+  - Backend: unchanged
+  - Frontend:
+    - `configure()` override snapshots first-call `info` into `app.graph._ppInitialStates[nodeId]` (saved once per node; edits do not overwrite)
+    - `LGraph.prototype.clear` patched in `setup()` to reset `_ppInitialStates` on workflow switch (avoids stale state leaking into new workflow)
+    - `onRemoved` stashes `{oldId, savedInfo, time}` into `app.graph._ppPendingReload` before deletion
+    - `onAdded` (`setTimeout(0)`) consumes pending reload within 500ms, applies state via `restoreInitialState()`, and re-keys the snapshot under the new id so subsequent reloads keep working
+  - Why onRemoved→onAdded bridge: ComfyUI's Reload Node creates the replacement with a **new node id** (confirmed via console: oldId=129 → newId=142), so direct `_ppInitialStates[this.id]` lookup fails for the new instance
+  - Helper: `restoreInitialState(node, savedInfo)` writes `widgets_values` back into `node.widgets`, restores `isEditMode`/`hidePreview`, clears preview override
+  - Bonus fix: `addEditButton()` spacer widget now passes a no-op callback + `serialize: false` to suppress the `LiteGraph addWidget(...) without a callback` warning
 
 ### Recent Changes (March 25, 2026)
 - ✅ **Nodes 2.0 DOM Widget UI**: Full interactive UI for Nodes 2.0 mode via `addDOMWidget`

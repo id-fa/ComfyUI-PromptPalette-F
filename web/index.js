@@ -155,6 +155,22 @@ app.registerExtension({
     name: "PromptPalette_F",
 
     setup() {
+        // Reset per-node initial-state snapshots whenever the graph is cleared
+        // (workflow switch / new workflow), so Reload Node uses the correct workflow's state.
+        try {
+            const graphProto = app.graph && app.graph.constructor && app.graph.constructor.prototype;
+            if (graphProto && !graphProto.__ppClearHooked) {
+                graphProto.__ppClearHooked = true;
+                const origClear = graphProto.clear;
+                graphProto.clear = function() {
+                    if (this._ppInitialStates) this._ppInitialStates = {};
+                    return origClear.apply(this, arguments);
+                };
+            }
+        } catch (e) {
+            console.warn("[PromptPalette_F] Failed to hook graph.clear:", e);
+        }
+
         // Patch api.queuePrompt to inject widget values for Nodes 2.0 mode
         // (widgets are removed from array to hide them, so ComfyUI can't serialize them)
         // Also injects preview_override for Classic mode.
@@ -419,7 +435,48 @@ app.registerExtension({
 
         // Add a delayed check for Nodes 2.0 mode
         // If onDrawForeground is never called, we're in Nodes 2.0
+        // Track Reload Node: capture saved initial state before the old instance is removed,
+        // so the newly-added instance (which gets a brand-new id) can pick it up.
+        const origOnRemoved = nodeType.prototype.onRemoved;
+        nodeType.prototype.onRemoved = function() {
+            try {
+                if (app.graph && this.id != null && app.graph._ppInitialStates) {
+                    const savedInfo = app.graph._ppInitialStates[this.id];
+                    if (savedInfo) {
+                        app.graph._ppPendingReload = {
+                            oldId: this.id,
+                            savedInfo: savedInfo,
+                            time: Date.now(),
+                        };
+                    }
+                }
+            } catch (e) {
+                console.warn("[PromptPalette_F] onRemoved pending-reload capture failed:", e);
+            }
+            if (origOnRemoved) origOnRemoved.apply(this, arguments);
+        };
+
         nodeType.prototype.onAdded = function() {
+            // Reload Node recovery: if a PromptPalette_F was just removed with a saved
+            // initial state, transfer it to this new instance (ComfyUI assigns a fresh id).
+            setTimeout(() => {
+                if (this.__ppReloadChecked) return;
+                this.__ppReloadChecked = true;
+                if (!app.graph || this.id == null) return;
+
+                const pending = app.graph._ppPendingReload;
+                if (pending && (Date.now() - pending.time) < 500) {
+                    console.log("[PromptPalette_F] Reload Node detected - restoring initial workflow state (oldId:", pending.oldId, "→ newId:", this.id, ")");
+                    restoreInitialState(this, pending.savedInfo);
+                    // Re-key the saved state under the new id so subsequent reloads keep working
+                    if (!app.graph._ppInitialStates) app.graph._ppInitialStates = {};
+                    app.graph._ppInitialStates[this.id] = pending.savedInfo;
+                    delete app.graph._ppInitialStates[pending.oldId];
+                    app.graph._ppPendingReload = null;
+                    if (app.graph) app.graph.setDirtyCanvas(true, true);
+                }
+            }, 0);
+
             this._promptPalette_modeDetectionTimeout = setTimeout(() => {
                 if (!this._promptPalette_setupDone) {
                     // onDrawForeground was never called - we're in Nodes 2.0 mode
@@ -563,6 +620,19 @@ app.registerExtension({
                 this.hidePreview = info.hidePreview;
             }
 
+            // Snapshot initial workflow state for Reload Node recovery.
+            // Only saved on the first configure() (i.e. workflow load); subsequent edits don't overwrite.
+            if (app.graph && this.id != null) {
+                if (!app.graph._ppInitialStates) app.graph._ppInitialStates = {};
+                if (!app.graph._ppInitialStates[this.id]) {
+                    try {
+                        app.graph._ppInitialStates[this.id] = JSON.parse(JSON.stringify(info));
+                    } catch (e) {
+                        console.warn("[PromptPalette_F] Failed to snapshot initial state:", e);
+                    }
+                }
+            }
+
             // Clear preview_override on workflow load (temporary feature)
             setPreviewOverride(this, "");
             const overrideWidgetCfg = findOverrideWidget(this);
@@ -592,6 +662,22 @@ function findWidgetByName(node, name) {
         if (w.name === name) return w;
     }
     return null;
+}
+
+// Restore widgets and custom state from a snapshot saved at workflow-load time.
+// Used by the Reload Node recovery path so users don't lose their original Edit contents.
+function restoreInitialState(node, savedInfo) {
+    if (savedInfo.widgets_values && node.widgets) {
+        const values = savedInfo.widgets_values;
+        for (let i = 0; i < node.widgets.length && i < values.length; i++) {
+            if (values[i] !== undefined) {
+                node.widgets[i].value = values[i];
+            }
+        }
+    }
+    if (savedInfo.isEditMode !== undefined) node.isEditMode = savedInfo.isEditMode;
+    if (savedInfo.hidePreview !== undefined) node.hidePreview = savedInfo.hidePreview;
+    setPreviewOverride(node, "");
 }
 
 function findTextWidget(node) {
@@ -659,7 +745,7 @@ function addEditButton(node, textWidget, app) {
     node.lastPreviewText = "";
 
     // Add spacing below buttons
-    const spacer = node.addWidget("text", "", "");
+    const spacer = node.addWidget("text", "", "", () => {}, { serialize: false });
     spacer.hidden = true;
     spacer.computeSize = () => [0, 6];
 
