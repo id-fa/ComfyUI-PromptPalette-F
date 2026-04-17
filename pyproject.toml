@@ -1,6 +1,6 @@
 [project]
 name = "promptpalette-f"
-version = "2.1.1"
+version = "2.1.2"
 description = "An interactive prompt editing interface with checkbox-based phrase toggling for ComfyUI."
 readme = "README.md"
 license = { file = "LICENSE" }
