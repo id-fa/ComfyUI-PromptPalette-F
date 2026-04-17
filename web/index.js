@@ -443,11 +443,25 @@ app.registerExtension({
                 if (app.graph && this.id != null && app.graph._ppInitialStates) {
                     const savedInfo = app.graph._ppInitialStates[this.id];
                     if (savedInfo) {
-                        app.graph._ppPendingReload = {
+                        const pending = {
                             oldId: this.id,
                             savedInfo: savedInfo,
                             time: Date.now(),
                         };
+                        app.graph._ppPendingReload = pending;
+
+                        // Expire pending if no matching onAdded consumed it (i.e. a plain delete,
+                        // not a Reload Node): drop the pending slot AND the orphan initial-state
+                        // entry so they don't leak across the session.
+                        setTimeout(() => {
+                            if (!app.graph) return;
+                            if (app.graph._ppPendingReload === pending) {
+                                app.graph._ppPendingReload = null;
+                                if (app.graph._ppInitialStates) {
+                                    delete app.graph._ppInitialStates[pending.oldId];
+                                }
+                            }
+                        }, 500);
                     }
                 }
             } catch (e) {
