@@ -49,20 +49,21 @@ The project follows ComfyUI's custom node structure with V3 API compliance and d
 
 ### Core Components
 
-1. **PromptPalette_F Node (V3/V1 Hybrid)** (`nodes.py:21-167`):
-   - **Conditional V3 Schema** (lines 23-64): Defined via `define_schema()` classmethod when V3 available
+1. **PromptPalette_F Node (V3/V1 Hybrid)** (`nodes.py`):
+   - **Conditional V3 Schema**: Defined via `define_schema()` classmethod when V3 available
      - Input types: Uses `io.String.Input()` and `io.Boolean.Input()` (not string-based)
      - Important: `rows` parameter not supported by V3 API (removed after initial error)
-   - **V1 INPUT_TYPES** (lines 67-84): Always defined for backward compatibility
+   - **V1 INPUT_TYPES**: Always defined for backward compatibility
      - String-based types: `"STRING"`, `"BOOLEAN"`
-     - Uses `forceInput` (V1 style) instead of `force_input` (V3 style)
-   - **Execution**: `execute()` classmethod processes text (lines 106-167)
-   - **Preview override**: `preview_override` parameter enables temporary prompt editing from frontend; when non-empty, bypasses all text processing and returns override text directly (lines 110-115)
+     - `prefix` is a multiline STRING widget (NOT `forceInput` — was changed from slot in May 2026)
+   - **Input order (required → optional)**: `text` → `separator` → `trailing_separator` → `separator_newline` → `add_newline` → `preview_override` → `prefix` → `prefix_separator`. New optional inputs are always appended at the end to preserve `widgets_values` index stability for older saves
+   - **Execution**: `execute()` classmethod processes text
+   - **Preview override**: `preview_override` parameter enables temporary prompt editing from frontend; when non-empty, bypasses all text processing and returns override text directly
    - Processes multiline text input by filtering commented lines (lines starting with `//` or `#`)
    - Handles inline comments by splitting on `//` and keeping only the content before
    - Uses custom separator (default: `, `) to join non-commented lines
    - Supports empty separator for no spacing/newlines between phrases
-   - Combines result with optional prefix input using the same separator
+   - Concatenates a `prefix` text widget before the body (no separator by default; insert one only when `prefix_separator=True`)
    - Supports adding newline at end of output (`add_newline` parameter)
    - Supports adding newline after separator (`separator_newline` parameter)
    - Supports trailing separator (`trailing_separator` parameter)
@@ -101,21 +102,23 @@ The project follows ComfyUI's custom node structure with V3 API compliance and d
      - `api.queuePrompt` patch injects all values from `_ppWidgetRefs` into prompt data at execution time
 
 3. **UI System**:
-   - **Edit mode**: Shows standard multiline text widget, separator input, and newline options for direct editing
+   - **Edit mode**: Shows standard multiline text widget, separator input, and newline options (including `prefix_separator` checkbox) for direct editing
    - **Display mode**: Custom-drawn interface with checkboxes, phrase text, weight controls, and group controls
+   - **Prefix widget (always visible)**: Multiline textarea displayed at the very top of the node in both display and edit modes (Classic via `reorderPrefixToTop`, Nodes 2.0 via `renderPrefixArea` called at the top of `render()`). Default height ~2 lines (52px)
    - **Interactive elements**: Checkboxes for toggling comments, +/- buttons for weight adjustment, group toggle buttons, global toggle buttons, clickable text areas
    - **Row selection**: Click anywhere on phrase text to toggle (excludes weight control buttons on right)
    - **Visual feedback**: Different colors for active/inactive text, bold text for weighted phrases
    - **Text wrapping**: Long phrases automatically wrap within node boundaries
    - **Description comments**: `#` comments display as italic explanatory text above phrases
    - **Group controls**: Horizontal row with global `[all]`/`[off]` buttons (green/red) followed by group buttons for batch phrase control
+   - **Phrase list scrolling (Classic mode)**: Node auto-grow is capped at `CONFIG.maxAutoNodeHeight` (600px); beyond that, the checkbox area becomes scrollable. Operate via ▲▼ scrollbar buttons on the right edge of the phrase area or via mouse wheel (handled by a document-level capture-phase listener so it isn't preempted by ComfyUI's canvas zoom)
 
 ### Advanced Features
 
 4. **Custom Separator System** (`nodes.py:43-89`):
    - Configurable separator input parameter (default: `, `)
    - Empty separator support for no spacing between phrases
-   - Consistent separator usage for prefix concatenation
+   - `prefix_separator` (BOOLEAN) toggles whether `separator` is inserted between prefix and body — default is plain `prefix + body` concat
    - Backend filtering of both `//` (toggle) and `#` (description) comments
    - Optional newline addition after separators (`separator_newline` parameter)
    - Optional newline addition at end of output (`add_newline` parameter)
@@ -318,7 +321,12 @@ This project requires no build process or package management - it's a pure Comfy
 - **Preview override**: Temporary edit stored on `node._promptPalette_previewOverride`, injected into prompt via `api.queuePrompt` patch, auto-cleared on source text change
 - **HTML overlay pattern**: `openPreviewEditor()` creates `position: fixed` container with toolbar + textarea, uses canvas coordinate transform for positioning, manages focus with `setTimeout` delays to avoid LiteGraph interference
 - **Reload Node recovery**: Initial workflow state snapshotted on first `configure()` into `app.graph._ppInitialStates[nodeId]`. Because ComfyUI's Reload Node assigns a **new id** to the recreated instance, a `onRemoved` → `onAdded` bridge (`app.graph._ppPendingReload`) transfers the saved state and re-keys it under the new id. Graph-level state cleared via patched `LGraph.prototype.clear` on workflow switch.
-- **State management**: Node tracks edit mode, clickable areas, widget visibility, text wrapping, and preview override
+- **Prefix as widget (not slot)**: `prefix` is a multiline STRING widget that is **always visible** in Classic display mode and rendered at the top of the node (`reorderPrefixToTop()` moves it to `widgets[0]` after `configure()`). DOM Widget UI renders the prefix textarea at the top of both display and edit modes. `prefix_separator` toggles whether `separator` is inserted between prefix and body
+- **`PP_INPUT_ORDER` invariant**: `serialize()` always lays out `node.widgets[]` into `PP_INPUT_ORDER` before delegating to `origSerialize`, then restores. `restoreInitialState()` maps `widgets_values[i]` to `findWidgetByName(node, PP_INPUT_ORDER[i])`. Together, these decouple display order (which can be freely reshuffled) from save/restore order
+- **Legacy widgets_values sanitization**: `sanitizeLegacyPrefixValues()` resets `"edit_text"`/`"toggle_preview"` button labels that pre-prefix-widget saves dropped into the new prefix indices
+- **Phrase list scrolling (Classic mode)**: Auto-grow capped at `CONFIG.maxAutoNodeHeight` (600px). When content exceeds the visible phrase area, `node.checkboxScrollOffset` (line units) scrolls. `drawCheckboxItems` uses `ctx.clip` for visual clipping and only registers clickable areas at *displayed* Y. Wheel scrolling via a document-level capture-phase listener installed in `setup()` (intercepts before ComfyUI's canvas zoom). `cb_scroll_up` / `cb_scroll_down` actions for the ▲▼ buttons
+- **Width-shrink invariant**: `nodeType.prototype.computeSize` MUST NOT return the current node width — LiteGraph reads it as the drag-resize minimum. Width preservation on configure/redraw is done by passing `[this.size[0], computed[1]]` to `setSize` explicitly. Widget-level `computeSize` (e.g., prefix) must return `[0, h]` for the same reason
+- **State management**: Node tracks edit mode, clickable areas, widget visibility, text wrapping, preview override, and `checkboxScrollOffset`
 - **Canvas redrawing**: Triggered via `app.graph.setDirtyCanvas(true)` after state changes
 
 ## Code Organization
@@ -387,6 +395,42 @@ This project includes `pyproject.toml` for ComfyUI registry publication followin
 - **Repository**: https://github.com/id-fa/ComfyUI-PromptPalette-F
 
 ## Development Status
+
+### Recent Changes (May 20, 2026)
+- ✅ **`prefix` redesigned as widget + new `prefix_separator` toggle**: `prefix` is no longer a forced-input slot — it is now a multiline STRING widget concatenated directly before the body. A new BOOLEAN `prefix_separator` (default `False`) controls whether the configured `separator` is inserted between `prefix` and the body
+  - Backend (`nodes.py`):
+    - V3 schema and V1 `INPUT_TYPES`: `prefix` changed to multiline text with default `""` (no `force_input` / `forceInput`); new `prefix_separator` BOOLEAN
+    - `execute()` signature: `prefix=""` (was `None`), new `prefix_separator=False`
+    - Concat logic: insert `effective_separator` between prefix and body only when `prefix_separator and separator != "" and filtered_lines` — otherwise plain `prefix + result` concat
+    - New optional inputs appended at the end of INPUT_TYPES so existing workflows' `widgets_values` index mapping stays stable
+  - Frontend (`web/index.js`):
+    - `findPrefixWidget()` / `findPrefixSeparatorWidget()` helpers
+    - prefix widget is **always visible** in Classic display mode (not gated behind Edit toggle); `prefix_separator` is Edit-mode-only since it is a settings toggle
+    - `prefix.computeSize = () => [0, 52]` — 2-line default height, width 0 so it does NOT pin node minimum width
+    - `reorderPrefixToTop()` runs in `onAdded` (`setTimeout(0)`, after configure) to push the prefix widget to `node.widgets[0]` for top-of-node display
+    - `_ppWidgetRefs` registration extended to include `prefix` and `prefix_separator` (so DOM Widget UI and queuePrompt patch carry them in Nodes 2.0 mode)
+    - DOM Widget UI: `renderPrefixArea()` is called at the **top** of `render()`, before `renderEditMode`/`renderDisplayMode`, so the prefix textarea is visible in both modes; `Prefix Sep` checkbox added to the options row (edit mode only)
+    - `Prefix` itself is **not** included in `generatePreview()` — preview shows only the body content (matches user-facing semantics; output and preview intentionally diverge by the prefix portion)
+- ✅ **Widgets-values backward compatibility**: When loading workflows saved before `prefix`/`prefix_separator` existed, button labels (`"edit_text"`, `"toggle_preview"`) used to land at those new indices. `sanitizeLegacyPrefixValues()` is called from `configure()` (and from `restoreInitialState()`) to detect and reset these artifacts
+- ✅ **Serialize override extended to both modes**: `serialize()` now always re-orders `node.widgets[]` into `PP_INPUT_ORDER` (the INPUT_TYPES order constant) before calling `origSerialize`, regardless of whether `_ppWidgetRefs` exists. This makes `widgets_values` index-stable across Classic ↔ Nodes 2.0 saves and accommodates the prefix-to-top display reorder. Buttons and spacers retain their relative trailing position
+- ✅ **`restoreInitialState()` switched to name-based mapping**: Walks `PP_INPUT_ORDER` and assigns `widgets_values[i]` to `findWidgetByName(node, PP_INPUT_ORDER[i])`, so Reload Node recovery is safe even after `widgets[]` has been reordered for display
+- ✅ **Phrase checkbox area is scrollable (Classic mode)**: Large phrase lists no longer make the node grow without bound
+  - `CONFIG.maxAutoNodeHeight = 600` caps the auto-grow ceiling (in both `computeSize()` and `drawCheckboxList`); the user can still drag the node taller manually
+  - `drawCheckboxList` computes `_ppCheckboxScroll = { areaTop, areaBottom, areaHeight, contentHeight, totalLines, visibleLines, maxScrollLines, scrollOffset }` and clamps `node.checkboxScrollOffset` per frame
+  - `drawCheckboxItems` uses `ctx.save()`/`ctx.beginPath()`/`ctx.rect(0, areaTop, w, areaHeight)`/`ctx.clip()` to clip drawing, applies `scrollOffset * lineHeight` to `currentY`, skips fully-off-screen rows, and reserves a right-side gutter (`CONFIG.scrollBarWidth + CONFIG.checkboxScrollPadding`) so weights/text don't slide under the bar
+  - `drawWeightControls` shifts its right-aligned buttons inward by the same gutter when scrolling
+  - New `drawCheckboxScrollBar()` draws ▲ button → track (with proportionally-sized thumb) → ▼ button on the right edge of the area; clickable areas use new actions `cb_scroll_up` / `cb_scroll_down`
+  - Click area Y coordinates added in `drawCheckboxItems` are the *displayed* Y (post-scroll), so hit-testing matches what the user sees
+- ✅ **Mouse-wheel scrolling for the phrase list**: A capture-phase `wheel` listener on `document` (installed once in `setup()`, guarded by `window.__ppPromptPaletteWheelHooked`) intercepts wheel events before ComfyUI's canvas zoom handler
+  - Why `document`, not `app.canvas.canvas`: `app.canvas` may be undefined when `setup()` first runs, and the document-level listener is active immediately
+  - Why capture phase + `passive: false`: capture fires before LiteGraph's bubble-phase listener on the canvas, so `event.preventDefault() + stopImmediatePropagation()` prevents the zoom
+  - Coordinate transform uses LiteGraph's `convertCanvasToOffset` convention: `graphX = canvasX / scale - offset[0]` (NOT `(canvasX - offset[0]) / scale` — that variant is off at non-1 zoom). `event.target === canvas.canvas` guard ensures wheel events over HTML widgets/textareas are left alone
+  - `app.graph.getNodeOnPos(graphX, graphY)` identifies the topmost node; only PromptPalette_F in Classic display mode with `maxScrollLines > 0` and cursor inside `[areaTop, areaBottom]` consumes the event
+  - LiteGraph node-level `onMouseWheel` is unused because ComfyUI's canvas zoom handler runs before LiteGraph dispatches wheel events to nodes (verified empirically)
+- ✅ **Node width can be shrunk freely after manual resize**: Fixed a regression where the user could widen the node but never narrow it again
+  - Root cause: `nodeType.prototype.computeSize` returned `(this.size && this.size[0]) ? this.size[0] : (out ? out[0] : 400)` — i.e., it reported the *current* node width as the natural width. LiteGraph treats the return of `computeSize()` as the minimum size during drag-resize, so every time the user widened, the floor moved up with them
+  - Fix: `computeSize()` now returns `[out ? out[0] : 300, totalHeight]` — a fixed 300px minimum. Width preservation across `configure()` / tab switch / mode detection is done by passing `[this.size[0], computed[1]]` explicitly to each `setSize` call instead (already the pattern in `configure()`; updated the three `setSize(this.computeSize())` call sites in mode-detection code to match)
+- ✅ **Prefix widget `computeSize` returns `[0, 52]`**: not `[this.width || 0, 52]`. The first element is summed/maxed by LiteGraph against the node's minimum width, so any non-zero value would re-introduce the shrink-block bug
 
 ### Recent Changes (April 18, 2026)
 - ✅ **Reload Node recovery**: On right-click → Reload Node, the node now reverts to the state at workflow-open time instead of losing all Edit content
@@ -507,6 +551,33 @@ This project includes `pyproject.toml` for ComfyUI registry publication followin
 - **Status**: ✅ Working correctly with adaptive detection
 
 ## Fixed Issues
+
+### Node Width Could Not Be Shrunk After Manual Widening (Resolved - May 20, 2026)
+- **Issue**: After dragging the node wider, the user could no longer drag the right edge to make it narrower. Width-grow worked; width-shrink and height-resize were fine. Reloading the workflow temporarily restored shrink ability — until the user widened the node again
+- **Root Cause**: `nodeType.prototype.computeSize` was returning `(this.size && this.size[0]) ? this.size[0] : (out ? out[0] : 400)` for the width component — i.e., reporting the *current* node width as the natural size. LiteGraph reads `computeSize()` as the **minimum allowed size during user drag-resize**, so every widening operation effectively raised the floor. This was a side-effect of the January 2026 "Window Size Stability" fix, which tried to preserve width by routing it through computeSize
+- **Solution**:
+  - `computeSize()` width component changed to `out ? out[0] : 300` — a fixed 300px minimum that decouples from current width
+  - Width preservation is done **explicitly at each `setSize` call site** by passing `[this.size[0], computed[1]]`, not via `computeSize`. Updated three `setSize(this.computeSize())` sites in mode-detection code to follow this pattern
+  - `prefix.computeSize` returns `[0, 52]` (width 0 — LiteGraph takes max of widget widths as part of node min width, so any positive value would re-introduce the constraint)
+- **Status**: ✅ Resolved
+- **Code Location**: `web/index.js` `computeSize` override (~660), mode-detection `setSize` sites (~444, ~483, ~508), prefix widget setup (~256)
+
+### Phrase List Made Node Excessively Tall With Many Choices (Resolved - May 20, 2026)
+- **Issue**: Adding a large number of phrase choices auto-grew the node to a ridiculous height; users wanted scrolling instead
+- **Solution**:
+  - `CONFIG.maxAutoNodeHeight = 600` caps auto-grow in both `computeSize` and `drawCheckboxList`
+  - `drawCheckboxList` computes scroll metrics (`_ppCheckboxScroll`); `drawCheckboxItems` uses `ctx.clip` and applies `node.checkboxScrollOffset`
+  - `drawCheckboxScrollBar` draws ▲▼ buttons + thumb on the right edge; weight controls shifted inward to avoid overlap
+  - Mouse wheel handled by a `document`-level capture-phase listener (not `app.canvas.canvas` or LiteGraph node-level `onMouseWheel` — both fire too late, after ComfyUI's canvas zoom handler). Uses LiteGraph's `convertCanvasToOffset` coordinate convention (`graphX = canvasX / scale - offset[0]`)
+- **Status**: ✅ Resolved
+- **Code Location**: `web/index.js` `drawCheckboxList`, `drawCheckboxItems`, `drawCheckboxScrollBar`, wheel hook in `setup()`
+
+### Prefix Connection Caused Leading Separator In Output (Resolved - May 20, 2026)
+- **Issue**: When the `prefix` slot was wired up, the output started with a `separator` (or `separator + newline`) even though the preview area didn't show one. Users saw "an empty value inserted at the beginning"
+- **Root Cause**: `execute()` always inserted `separator` between prefix and body when both were truthy. The preview generator never includes prefix, so any discrepancy between prefix-included output and prefix-stripped preview manifested as a "phantom separator" at the start of the output
+- **Solution**: `prefix` is no longer a slot — it is a multiline text widget with a new explicit `prefix_separator` BOOLEAN toggle (default `False` → plain concat). Separator insertion happens only when the user opts in. Preview semantics unchanged
+- **Status**: ✅ Resolved
+- **Code Location**: `nodes.py` `execute()` prefix-concat block
 
 ### Nodes 2.0 Mode Setting Persistence (Resolved - May 20, 2026)
 - **Issue**: In Nodes 2.0 mode, the following settings were not persisted across save/reload:

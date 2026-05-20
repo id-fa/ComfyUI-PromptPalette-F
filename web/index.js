@@ -24,6 +24,10 @@ const CONFIG = {
     groupButtonHeight: 20,   // Height of group toggle buttons
     groupButtonMargin: 4,    // Margin between group buttons
     groupAreaHeight: 28,     // Total height for group control area
+    maxAutoNodeHeight: 600,  // Cap auto-grow; checkbox area scrolls beyond this
+    minCheckboxAreaHeight: 80, // Minimum height for the scrollable phrase list
+    checkboxScrollPadding: 4, // Space between phrase content and right scroll bar
+    wheelScrollLines: 2,     // Lines moved per mouse-wheel step
 };
 
 // ========================================
@@ -207,6 +211,67 @@ app.registerExtension({
             }
             return origQueuePrompt(number, { output, workflow });
         };
+
+        // ComfyUI's canvas wheel handler zooms the whole graph and runs before
+        // LiteGraph dispatches onMouseWheel to nodes, so node-level wheel hooks
+        // never fire here. Attach a capture-phase listener at the document level
+        // so it's active immediately on extension load (no dependency on
+        // app.canvas being ready) and runs before any canvas/window listener.
+        if (!window.__ppPromptPaletteWheelHooked) {
+            window.__ppPromptPaletteWheelHooked = true;
+
+            document.addEventListener('wheel', (event) => {
+                try {
+                    const canvas = app.canvas;
+                    if (!canvas || !canvas.canvas || !app.graph) return;
+                    const ds = canvas.ds;
+                    if (!ds) return;
+
+                    // Bail if the wheel happened over a different element
+                    // (textarea inside an HTML widget, toolbar, etc.). Only
+                    // intercept when the cursor is truly over the graph canvas.
+                    if (event.target !== canvas.canvas) return;
+
+                    const rect = canvas.canvas.getBoundingClientRect();
+                    // Screen-pixel cursor position relative to the canvas
+                    const cx = event.clientX - rect.left;
+                    const cy = event.clientY - rect.top;
+
+                    // LiteGraph DragAndScale convention:
+                    //   graphX = canvasX / scale - offset[0]
+                    //   graphY = canvasY / scale - offset[1]
+                    const graphX = cx / ds.scale - ds.offset[0];
+                    const graphY = cy / ds.scale - ds.offset[1];
+
+                    // Use LiteGraph's hit-test to find the topmost node — leaves
+                    // wheel for canvas zoom when any other node type is on top.
+                    const node = app.graph.getNodeOnPos
+                        ? app.graph.getNodeOnPos(graphX, graphY)
+                        : null;
+                    if (!node || node.type !== 'PromptPalette_F') return;
+                    if (node.flags && node.flags.collapsed) return;
+                    if (node.isEditMode) return;
+
+                    const scroll = node._ppCheckboxScroll;
+                    if (!scroll || scroll.maxScrollLines <= 0) return;
+
+                    const localY = graphY - node.pos[1];
+                    if (localY < scroll.areaTop || localY > scroll.areaBottom) return;
+
+                    const delta = event.deltaY || -event.wheelDelta || 0;
+                    if (delta === 0) return;
+                    const step = (delta > 0 ? 1 : -1) * CONFIG.wheelScrollLines;
+                    node.checkboxScrollOffset = Math.max(0, Math.min(scroll.maxScrollLines, (node.checkboxScrollOffset || 0) + step));
+                    app.graph.setDirtyCanvas(true);
+
+                    event.preventDefault();
+                    event.stopPropagation();
+                    if (event.stopImmediatePropagation) event.stopImmediatePropagation();
+                } catch (e) {
+                    console.warn("[PromptPalette_F] wheel handler error:", e);
+                }
+            }, { capture: true, passive: false });
+        }
     },
 
     async beforeRegisterNodeDef(nodeType, nodeData, app) {
@@ -240,6 +305,8 @@ app.registerExtension({
             const newlineWidget = findNewlineWidget(this);
             const separatorNewlineWidget = findSeparatorNewlineWidget(this);
             const trailingSeparatorWidget = findTrailingSeparatorWidget(this);
+            const prefixWidget = findPrefixWidget(this);
+            const prefixSeparatorWidget = findPrefixSeparatorWidget(this);
 
             // Hide override widget if it exists (managed programmatically)
             const overrideWidget = findOverrideWidget(this);
@@ -252,6 +319,19 @@ app.registerExtension({
                 if (newlineWidget) newlineWidget.hidden = true;
                 if (separatorNewlineWidget) separatorNewlineWidget.hidden = true;
                 if (trailingSeparatorWidget) trailingSeparatorWidget.hidden = true;
+                // prefix widget is always visible (pre-text shown above main content).
+                // prefix_separator only matters in edit mode (settings toggle).
+                if (prefixWidget) {
+                    prefixWidget.hidden = false;
+                    // Default to ~2 lines tall. Width must be 0 so the widget
+                    // doesn't act as a minimum-width constraint on the node
+                    // (LiteGraph sums widget computeSize widths when deciding
+                    //  how narrow the node can be made).
+                    prefixWidget.computeSize = function() {
+                        return [0, 52];
+                    };
+                }
+                if (prefixSeparatorWidget) prefixSeparatorWidget.hidden = true;
 
                 // Store reference to textWidget for later use
                 this._promptPalette_textWidget = textWidget;
@@ -356,9 +436,12 @@ app.registerExtension({
                 if (trailingSeparatorWidget) trailingSeparatorWidget.hidden = true;
                 const overrideWidgetClassic = findOverrideWidget(this);
                 if (overrideWidgetClassic) overrideWidgetClassic.hidden = true;
+                // prefix stays visible (always-on); prefix_separator only in edit mode
+                const prefixSeparatorWidgetClassic = findPrefixSeparatorWidget(this);
+                if (prefixSeparatorWidgetClassic) prefixSeparatorWidgetClassic.hidden = true;
 
-                // Force node size recalculation to show buttons
-                this.setSize(this.computeSize());
+                // Force node height recalculation to show buttons (preserve width)
+                this.setSize([this.size[0], this.computeSize()[1]]);
             }
 
             // After mode detection, if we're still being called, we're in Classic mode
@@ -372,6 +455,10 @@ app.registerExtension({
                 drawCheckboxList(this, ctx, textWidget.value, app);
             }
         };
+
+        // (Mouse wheel handling is installed at the canvas DOM level in setup()
+        //  via a capture-phase listener — LiteGraph's node-level onMouseWheel
+        //  fires too late, after ComfyUI's canvas zoom handler.)
 
         // Background drawing callback - works in both modes
         // Use this to dynamically control button visibility based on current mode
@@ -392,8 +479,8 @@ app.registerExtension({
                 // Classic mode: Create buttons if they don't exist
                 if (!this._promptPalette_editButton && this._promptPalette_textWidget) {
                     addEditButton(this, this._promptPalette_textWidget, app);
-                    // Force node size recalculation after adding buttons
-                    this.setSize(this.computeSize());
+                    // Force node height recalculation after adding buttons (preserve width)
+                    this.setSize([this.size[0], this.computeSize()[1]]);
                 }
                 // Hide warning widgets
                 if (this._promptPalette_nodes2Widget) {
@@ -418,7 +505,8 @@ app.registerExtension({
                     this._promptPalette_editButton = null;
                     this._promptPalette_previewButton = null;
                     this._promptPalette_spacer = null;
-                    this.setSize(this.computeSize());
+                    // Preserve current width (Nodes 2.0 mode switch)
+                    this.setSize([this.size[0], this.computeSize()[1]]);
                 }
                 // Hide warning widgets (DOM Widget replaces them)
                 if (this._promptPalette_nodes2Widget) {
@@ -471,24 +559,30 @@ app.registerExtension({
         };
 
         nodeType.prototype.onAdded = function() {
-            // Reload Node recovery: if a PromptPalette_F was just removed with a saved
-            // initial state, transfer it to this new instance (ComfyUI assigns a fresh id).
+            // Reload Node recovery + cosmetic prefix-to-top reorder.
+            // Both run AFTER configure() (which assigns widgets_values to widgets[] by index),
+            // so widget order can safely change without breaking value mapping.
             setTimeout(() => {
-                if (this.__ppReloadChecked) return;
-                this.__ppReloadChecked = true;
-                if (!app.graph || this.id == null) return;
-
-                const pending = app.graph._ppPendingReload;
-                if (pending && (Date.now() - pending.time) < 500) {
-                    console.log("[PromptPalette_F] Reload Node detected - restoring initial workflow state (oldId:", pending.oldId, "→ newId:", this.id, ")");
-                    restoreInitialState(this, pending.savedInfo);
-                    // Re-key the saved state under the new id so subsequent reloads keep working
-                    if (!app.graph._ppInitialStates) app.graph._ppInitialStates = {};
-                    app.graph._ppInitialStates[this.id] = pending.savedInfo;
-                    delete app.graph._ppInitialStates[pending.oldId];
-                    app.graph._ppPendingReload = null;
-                    if (app.graph) app.graph.setDirtyCanvas(true, true);
+                if (!this.__ppReloadChecked) {
+                    this.__ppReloadChecked = true;
+                    if (app.graph && this.id != null) {
+                        const pending = app.graph._ppPendingReload;
+                        if (pending && (Date.now() - pending.time) < 500) {
+                            console.log("[PromptPalette_F] Reload Node detected - restoring initial workflow state (oldId:", pending.oldId, "→ newId:", this.id, ")");
+                            restoreInitialState(this, pending.savedInfo);
+                            // Re-key the saved state under the new id so subsequent reloads keep working
+                            if (!app.graph._ppInitialStates) app.graph._ppInitialStates = {};
+                            app.graph._ppInitialStates[this.id] = pending.savedInfo;
+                            delete app.graph._ppInitialStates[pending.oldId];
+                            app.graph._ppPendingReload = null;
+                            if (app.graph) app.graph.setDirtyCanvas(true, true);
+                        }
+                    }
                 }
+
+                // Move prefix widget to the top of the widget list (Classic mode).
+                // serialize override re-applies INPUT_TYPES order so this is display-only.
+                reorderPrefixToTop(this);
             }, 0);
 
             this._promptPalette_modeDetectionTimeout = setTimeout(() => {
@@ -531,6 +625,8 @@ app.registerExtension({
                     const separatorNewlineWidget = findSeparatorNewlineWidget(this);
                     const trailingSeparatorWidget = findTrailingSeparatorWidget(this);
                     const overrideWidgetNodes2 = findOverrideWidget(this);
+                    const prefixWidgetNodes2 = findPrefixWidget(this);
+                    const prefixSeparatorWidgetNodes2 = findPrefixSeparatorWidget(this);
 
                     this._ppWidgetRefs = {
                         text: textWidget,
@@ -539,13 +635,16 @@ app.registerExtension({
                         separator_newline: separatorNewlineWidget,
                         trailing_separator: trailingSeparatorWidget,
                         preview_override: overrideWidgetNodes2,
+                        prefix: prefixWidgetNodes2,
+                        prefix_separator: prefixSeparatorWidgetNodes2,
                     };
 
                     if (this.widgets) {
                         const removeSet = new Set([
                             textWidget, separatorWidget, newlineWidget,
                             separatorNewlineWidget, trailingSeparatorWidget,
-                            overrideWidgetNodes2,
+                            overrideWidgetNodes2, prefixWidgetNodes2,
+                            prefixSeparatorWidgetNodes2,
                         ].filter(Boolean));
                         this.widgets = this.widgets.filter(w => !removeSet.has(w));
                     }
@@ -596,12 +695,20 @@ app.registerExtension({
             // Calculate preview height
             const previewHeight = this.hidePreview ? 0 : (CONFIG.previewSeparator + CONFIG.previewHeight);
 
-            // Total height
-            const totalHeight = textAreaHeight + widgetsHeight + previewHeight + CONFIG.widgetSpacing;
+            // Total height — capped to maxAutoNodeHeight so a giant phrase list
+            // doesn't create a comically tall node on creation. Beyond the cap,
+            // the phrase area scrolls (Classic mode).
+            const totalHeight = Math.min(
+                textAreaHeight + widgetsHeight + previewHeight + CONFIG.widgetSpacing,
+                CONFIG.maxAutoNodeHeight
+            );
 
-            // IMPORTANT: Always preserve current width if it exists
-            // Only use out[0] or default 400 if this.size doesn't exist yet
-            const width = (this.size && this.size[0]) ? this.size[0] : (out ? out[0] : 400);
+            // computeSize() is LiteGraph's "minimum size" probe used during
+            // user resize — it must NOT return the current node width, or the
+            // node becomes pinned to whatever the user last expanded it to and
+            // can never shrink. Width-preserving on configure() is handled
+            // separately in the configure() override below.
+            const width = out ? out[0] : 300;
             const height = totalHeight;
 
             return [width, height];
@@ -610,29 +717,34 @@ app.registerExtension({
         // serialize override - save node state
         const origSerialize = nodeType.prototype.serialize;
         nodeType.prototype.serialize = function() {
-            // Nodes 2.0 mode: standard widgets are removed from node.widgets array
-            // (since hidden=true doesn't work in Vue rendering) and backed up in _ppWidgetRefs.
-            // LiteGraph's serialize() walks node.widgets to build widgets_values, so without
-            // this temporary restore, all settings (separator/trailing/sep_nl/end_nl) would
-            // be lost on save and reset to defaults on reload.
-            const refs = this._ppWidgetRefs;
+            // Always lay out widgets in INPUT_TYPES order before serialize so that
+            // widgets_values stays index-consistent regardless of:
+            //   - Nodes 2.0 removing widgets from the array and backing them up in _ppWidgetRefs
+            //   - Classic mode reordering widgets[] for display (prefix-to-top)
             let originalWidgets = null;
+            const refs = this._ppWidgetRefs;
 
-            if (refs && this.widgets) {
+            if (this.widgets) {
                 originalWidgets = [...this.widgets];
 
-                // Order must match INPUT_TYPES order so configure() maps widgets_values back correctly
-                const orderedNames = ['text', 'separator', 'trailing_separator', 'separator_newline', 'add_newline', 'preview_override'];
-                const refsToRestore = [];
-                for (const name of orderedNames) {
-                    if (refs[name]) {
-                        refsToRestore.push(refs[name]);
+                const orderedWidgets = [];
+                for (const name of PP_INPUT_ORDER) {
+                    let w = null;
+                    if (refs && refs[name]) {
+                        w = refs[name];
+                    } else {
+                        w = this.widgets.find(widget => widget.name === name);
                     }
+                    if (w) orderedWidgets.push(w);
                 }
 
-                // Place refs widgets first (INPUT_TYPES order). DOM widget has serialize:false
-                // so its position doesn't affect widgets_values.
-                this.widgets = [...refsToRestore, ...originalWidgets];
+                // Other widgets (buttons, spacers) keep their original relative order
+                // after the named inputs. Spacer has serialize:false; buttons keep
+                // their existing trailing positions to match historical saves.
+                const namedSet = new Set(orderedWidgets);
+                const otherWidgets = this.widgets.filter(w => !namedSet.has(w));
+
+                this.widgets = [...orderedWidgets, ...otherWidgets];
             }
 
             const data = origSerialize ? origSerialize.apply(this, arguments) : {};
@@ -654,6 +766,11 @@ app.registerExtension({
             if (origConfigure) {
                 origConfigure.apply(this, arguments);
             }
+
+            // Backward compat: pre-widget-prefix workflows had button labels
+            // ("edit_text"/"toggle_preview") at the indices now occupied by prefix
+            // and prefix_separator. Reset those before they reach the UI.
+            sanitizeLegacyPrefixValues(this);
 
             // Restore custom state
             if (info.isEditMode !== undefined) {
@@ -707,16 +824,47 @@ function findWidgetByName(node, name) {
     return null;
 }
 
+// INPUT_TYPES order — used by serialize override and restoreInitialState to
+// map widgets_values entries to the correct widget regardless of display order.
+const PP_INPUT_ORDER = ['text', 'separator', 'trailing_separator', 'separator_newline', 'add_newline', 'preview_override', 'prefix', 'prefix_separator'];
+
+// Reorder widgets[] so the prefix textarea appears at the top of the node UI.
+// serialize override re-applies INPUT_TYPES order so this is purely cosmetic.
+function reorderPrefixToTop(node) {
+    if (!node.widgets) return;
+    const prefixW = node.widgets.find(w => w.name === 'prefix');
+    if (!prefixW) return;
+    if (node.widgets[0] === prefixW) return;
+    const others = node.widgets.filter(w => w !== prefixW);
+    node.widgets = [prefixW, ...others];
+}
+
+// Workflows saved before prefix became a widget had button labels
+// ("edit_text"/"toggle_preview") slotted into the indices now occupied by prefix
+// and prefix_separator. Reset them to defaults on first load.
+function sanitizeLegacyPrefixValues(node) {
+    const prefixW = findWidgetByName(node, 'prefix');
+    if (prefixW && (prefixW.value === 'edit_text' || prefixW.value === 'toggle_preview')) {
+        prefixW.value = '';
+    }
+    const prefixSepW = findWidgetByName(node, 'prefix_separator');
+    if (prefixSepW && typeof prefixSepW.value !== 'boolean') {
+        prefixSepW.value = false;
+    }
+}
+
 // Restore widgets and custom state from a snapshot saved at workflow-load time.
 // Used by the Reload Node recovery path so users don't lose their original Edit contents.
+// Name-based mapping so it works regardless of any display-order reshuffling.
 function restoreInitialState(node, savedInfo) {
     if (savedInfo.widgets_values && node.widgets) {
         const values = savedInfo.widgets_values;
-        for (let i = 0; i < node.widgets.length && i < values.length; i++) {
-            if (values[i] !== undefined) {
-                node.widgets[i].value = values[i];
-            }
+        for (let i = 0; i < values.length && i < PP_INPUT_ORDER.length; i++) {
+            if (values[i] === undefined) continue;
+            const widget = findWidgetByName(node, PP_INPUT_ORDER[i]);
+            if (widget) widget.value = values[i];
         }
+        sanitizeLegacyPrefixValues(node);
     }
     if (savedInfo.isEditMode !== undefined) node.isEditMode = savedInfo.isEditMode;
     if (savedInfo.hidePreview !== undefined) node.hidePreview = savedInfo.hidePreview;
@@ -747,6 +895,14 @@ function findOverrideWidget(node) {
     return findWidgetByName(node, "preview_override");
 }
 
+function findPrefixWidget(node) {
+    return findWidgetByName(node, "prefix");
+}
+
+function findPrefixSeparatorWidget(node) {
+    return findWidgetByName(node, "prefix_separator");
+}
+
 function addEditButton(node, textWidget, app) {
     // This function is only called in Classic mode, so no mode checking needed
     const textButton = node.addWidget("button", "Edit", "edit_text", () => {
@@ -767,6 +923,11 @@ function addEditButton(node, textWidget, app) {
         const trailingSeparatorWidget = findTrailingSeparatorWidget(node);
         if (trailingSeparatorWidget) {
             trailingSeparatorWidget.hidden = !node.isEditMode;
+        }
+        // prefix widget stays visible regardless of edit mode (always-on pre-text)
+        const prefixSeparatorWidget = findPrefixSeparatorWidget(node);
+        if (prefixSeparatorWidget) {
+            prefixSeparatorWidget.hidden = !node.isEditMode;
         }
         textButton.name = node.isEditMode ? "Save" : "Edit";
         app.graph.setDirtyCanvas(true); // Redraw canvas
@@ -878,6 +1039,15 @@ function handleClickableAreaAction(area, textWidget, app) {
         case 'scroll_down':
             // Max scroll will be calculated in drawPreview
             this.previewScrollOffset = this.previewScrollOffset + 1;
+            app.graph.setDirtyCanvas(true);
+            break;
+        case 'cb_scroll_up':
+            this.checkboxScrollOffset = Math.max(0, (this.checkboxScrollOffset || 0) - 1);
+            app.graph.setDirtyCanvas(true);
+            break;
+        case 'cb_scroll_down':
+            // Upper bound enforced in drawCheckboxList
+            this.checkboxScrollOffset = (this.checkboxScrollOffset || 0) + 1;
             app.graph.setDirtyCanvas(true);
             break;
         case 'group_toggle':
@@ -1069,21 +1239,53 @@ function drawCheckboxList(node, ctx, text, app) {
     const baseTextHeight = Math.max(CONFIG.minNodeHeight, CONFIG.widgetSpacing + groupAreaHeight + totalWrappedLines * CONFIG.lineHeight + 20);
     const widgetsHeight = getWidgetsTotalHeight(node);
     const previewHeight = node.hidePreview ? 0 : (CONFIG.previewSeparator + CONFIG.previewHeight);
-    const totalHeight = baseTextHeight + widgetsHeight + previewHeight;
+    const desiredTotalHeight = baseTextHeight + widgetsHeight + previewHeight;
+    // Cap auto-grow so a huge phrase list doesn't produce a ridiculously tall node.
+    // Beyond the cap, the checkbox area scrolls instead. Users may still drag the
+    // node taller manually if they prefer to see more at once.
+    const cappedTotalHeight = Math.min(desiredTotalHeight, CONFIG.maxAutoNodeHeight);
 
     // Only increase size if current size is insufficient (with 50px tolerance)
     // Never shrink automatically to prevent jarring size changes
     // IMPORTANT: Only adjust height, preserve width
-    if (totalHeight > node.size[1] + 50) {
-        node.setSize([node.size[0], totalHeight]); // Keep current width, only adjust height
+    if (cappedTotalHeight > node.size[1] + 50) {
+        node.setSize([node.size[0], cappedTotalHeight]); // Keep current width, only adjust height
         app.graph.setDirtyCanvas(true);
     }
+
+    // Determine if checkbox area needs to scroll given the current node size.
+    // The area lives between the widgets/groups block and the (optional) preview block.
+    const checkboxAreaTop = widgetsHeight + CONFIG.widgetSpacing + groupAreaHeight;
+    const checkboxAreaBottom = node.size[1] - previewHeight;
+    const checkboxAreaHeight = Math.max(CONFIG.minCheckboxAreaHeight, checkboxAreaBottom - checkboxAreaTop);
+    const contentHeight = totalWrappedLines * CONFIG.lineHeight + 8; // bottom padding
+    const visibleLineCount = Math.max(1, Math.floor(checkboxAreaHeight / CONFIG.lineHeight));
+    const maxScrollLines = Math.max(0, totalWrappedLines - visibleLineCount);
+
+    // Clamp scroll offset to valid range
+    if (typeof node.checkboxScrollOffset !== 'number') node.checkboxScrollOffset = 0;
+    node.checkboxScrollOffset = Math.min(Math.max(0, node.checkboxScrollOffset), maxScrollLines);
+
+    // Expose scroll metrics so drawCheckboxItems and the scrollbar can use them
+    node._ppCheckboxScroll = {
+        areaTop: checkboxAreaTop,
+        areaBottom: checkboxAreaTop + checkboxAreaHeight,
+        areaHeight: checkboxAreaHeight,
+        contentHeight,
+        totalLines: totalWrappedLines,
+        visibleLines: visibleLineCount,
+        maxScrollLines,
+        scrollOffset: node.checkboxScrollOffset,
+    };
 
     // Text settings
     ctx.font = "14px monospace";
     ctx.textAlign = "left";
     if (text.trim() !== "") {
         drawCheckboxItems(ctx, lines, node);
+        if (maxScrollLines > 0) {
+            drawCheckboxScrollBar(ctx, node, getColors());
+        }
     } else {
         // If text is empty
         ctx.fillStyle = getColors().inactiveTextColor;
@@ -1099,92 +1301,118 @@ function drawCheckboxList(node, ctx, text, app) {
 }
 
 function drawCheckboxItems(ctx, lines, node) {
-    // Get group area height to offset drawing position
-    const groups = getAllGroups(lines.join('\n'));
-    const groupAreaHeight = groups.length > 0 ? CONFIG.groupAreaHeight : 0;
+    // Scroll metrics computed in drawCheckboxList
+    const scroll = node._ppCheckboxScroll || {
+        areaTop: getWidgetsTotalHeight(node) + CONFIG.widgetSpacing,
+        areaBottom: node.size[1],
+        areaHeight: node.size[1],
+        maxScrollLines: 0,
+        scrollOffset: 0,
+    };
+    const areaTop = scroll.areaTop;
+    const areaBottom = scroll.areaBottom;
+    const hasScrollBar = scroll.maxScrollLines > 0;
+    const scrollOffsetPx = scroll.scrollOffset * CONFIG.lineHeight;
 
-    const widgetsHeight = getWidgetsTotalHeight(node);
-    let currentY = widgetsHeight + CONFIG.widgetSpacing + groupAreaHeight;
-    const availableWidth = calculateAvailableTextWidth(node.size[0]);
+    // Reserve room for the scroll bar on the right so text/weight controls
+    // don't slide underneath it.
+    const scrollGutter = hasScrollBar ? (CONFIG.scrollBarWidth + CONFIG.checkboxScrollPadding) : 0;
+    const nodeWidth = node.size[0];
+    const availableWidth = calculateAvailableTextWidth(nodeWidth) - scrollGutter;
+    const weightControlsWidth = CONFIG.weightButtonSize * 2 + CONFIG.weightLabelWidth + 12;
+    const textClickableWidth = nodeWidth - CONFIG.sideNodePadding - CONFIG.checkboxSize - CONFIG.spaceBetweenCheckboxAndText - weightControlsWidth - CONFIG.sideNodePadding - scrollGutter;
+
+    // Clip drawing to the visible checkbox area so off-screen rows don't bleed
+    // over the preview / widgets.
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, areaTop, nodeWidth, Math.max(0, areaBottom - areaTop));
+    ctx.clip();
+
+    let currentY = areaTop - scrollOffsetPx;
 
     // Don't clear clickableAreas here - group controls have already been added
-    
+
     lines.forEach((line, index) => {
         // Skip empty lines and description comments (# comments are not drawn directly)
         if (isEmptyLine(line) || isDescriptionComment(line)) return;
-        
+
         const isCommented = line.trim().startsWith("//");
-        
+
         // Check if this line has a description comment
         const description = findDescriptionForLine(lines, index);
-        
+
         // Draw description comment if exists
         if (description) {
             ctx.font = `italic ${CONFIG.fontSize - 1}px monospace`;
             const descWrappedLines = wrapText(ctx, description, availableWidth + CONFIG.checkboxSize + CONFIG.spaceBetweenCheckboxAndText);
-            
+
             const colors = getColors();
             ctx.fillStyle = colors.inactiveTextColor;
             ctx.textAlign = "left";
-            
+
             descWrappedLines.forEach((descLine, wrapIndex) => {
                 const descY = currentY + wrapIndex * CONFIG.lineHeight;
+                if (descY + CONFIG.lineHeight < areaTop || descY > areaBottom) return; // off-screen
                 const checkboxCenter = descY + CONFIG.checkboxSize / 2;
                 const textBaseline = checkboxCenter + (CONFIG.fontSize - 1) * 0.35;
                 ctx.fillText(descLine, CONFIG.sideNodePadding, textBaseline);
             });
-            
+
             currentY += descWrappedLines.length * CONFIG.lineHeight;
         }
-        
+
         // Get phrase text for wrapping
         const phraseText = getPhraseText(line, isCommented);
-        
+
         // Set font for text measurement (same as used in drawPhraseText)
-        const textToCheck = isCommented ? 
-            (line.match(/^(\s*\/\/\s*)(.*)/)?.[2] || '') : 
+        const textToCheck = isCommented ?
+            (line.match(/^(\s*\/\/\s*)(.*)/)?.[2] || '') :
             line;
         const weight = parseWeight(textToCheck);
         const isBold = weight !== 1.0;
-        ctx.font = isBold ? 
-            `bold ${CONFIG.fontSize}px monospace` : 
+        ctx.font = isBold ?
+            `bold ${CONFIG.fontSize}px monospace` :
             `${CONFIG.fontSize}px monospace`;
-        
+
         // Wrap text
         const wrappedLines = wrapText(ctx, phraseText, availableWidth);
-        
-        // Draw checkbox (only on first line)
-        drawCheckbox(ctx, currentY, isCommented, node, index);
+        const phraseBlockHeight = wrappedLines.length * CONFIG.lineHeight;
+        const phraseVisible = (currentY + phraseBlockHeight > areaTop) && (currentY < areaBottom);
 
-        // Calculate weight controls area to exclude from text clickable area
-        const nodeWidth = node.size[0];
-        const weightControlsWidth = CONFIG.weightButtonSize * 2 + CONFIG.weightLabelWidth + 12; // 2 buttons + label + margins
-        const textClickableWidth = nodeWidth - CONFIG.sideNodePadding - CONFIG.checkboxSize - CONFIG.spaceBetweenCheckboxAndText - weightControlsWidth - CONFIG.sideNodePadding;
+        if (phraseVisible) {
+            // Draw checkbox (only on first line)
+            drawCheckbox(ctx, currentY, isCommented, node, index);
 
-        // Add clickable area for text (only on first wrapped line to avoid multiple triggers)
-        const textStartX = CONFIG.sideNodePadding + CONFIG.checkboxSize + CONFIG.spaceBetweenCheckboxAndText;
-        node.clickableAreas.push({
-            x: textStartX,
-            y: currentY,
-            w: textClickableWidth,
-            h: CONFIG.lineHeight,
-            type: 'text_toggle',
-            lineIndex: index,
-            action: 'toggle'
-        });
+            // Add clickable area for text (only on first wrapped line to avoid multiple triggers).
+            // Use the displayed Y so click hit-testing matches what the user sees.
+            const textStartX = CONFIG.sideNodePadding + CONFIG.checkboxSize + CONFIG.spaceBetweenCheckboxAndText;
+            node.clickableAreas.push({
+                x: textStartX,
+                y: currentY,
+                w: textClickableWidth,
+                h: CONFIG.lineHeight,
+                type: 'text_toggle',
+                lineIndex: index,
+                action: 'toggle'
+            });
 
-        // Draw wrapped text lines
-        wrappedLines.forEach((wrappedLine, wrapIndex) => {
-            const lineY = currentY + wrapIndex * CONFIG.lineHeight;
-            drawPhraseTextLine(ctx, wrappedLine, lineY, isCommented, isBold);
-        });
+            // Draw wrapped text lines (each one filtered by visibility)
+            wrappedLines.forEach((wrappedLine, wrapIndex) => {
+                const lineY = currentY + wrapIndex * CONFIG.lineHeight;
+                if (lineY + CONFIG.lineHeight < areaTop || lineY > areaBottom) return;
+                drawPhraseTextLine(ctx, wrappedLine, lineY, isCommented, isBold);
+            });
 
-        // Draw weight controls (only on first line)
-        drawWeightControls(ctx, currentY, line, isCommented, node, index);
+            // Draw weight controls (only on first line)
+            drawWeightControls(ctx, currentY, line, isCommented, node, index);
+        }
 
-        // Move to next position
-        currentY += wrappedLines.length * CONFIG.lineHeight;
+        // Move to next position regardless of visibility (layout is continuous)
+        currentY += phraseBlockHeight;
     });
+
+    ctx.restore();
 }
 
 function isEmptyLine(line) {
@@ -1425,20 +1653,27 @@ function drawPhraseTextLine(ctx, wrappedLine, y, isCommented, isBold) {
 
 function drawWeightControls(ctx, y, line, isCommented, node, lineIndex) {
     const nodeWidth = node.size[0];
-    
+
     // Get the text to check for weight
-    const textToCheck = isCommented ? 
-        (line.match(/^(\s*\/\/\s*)(.*)/)?.[2] || '') : 
+    const textToCheck = isCommented ?
+        (line.match(/^(\s*\/\/\s*)(.*)/)?.[2] || '') :
         line;
-    
+
     // Skip if it's a comment-only line (no text after //)
     if (isCommented && !textToCheck.trim()) return;
-    
+
     const weightText = getWeightText(textToCheck);
     const checkboxCenter = y + CONFIG.checkboxSize / 2;
-    
+
+    // Shift the weight controls inward when the phrase list is scrolling
+    // so they don't overlap the scrollbar on the right edge.
+    const scroll = node._ppCheckboxScroll;
+    const scrollGutter = (scroll && scroll.maxScrollLines > 0)
+        ? CONFIG.scrollBarWidth + CONFIG.checkboxScrollPadding
+        : 0;
+
     // Calculate positions from right to left
-    let currentX = nodeWidth - CONFIG.sideNodePadding;
+    let currentX = nodeWidth - CONFIG.sideNodePadding - scrollGutter;
     
     // Draw plus button
     const plusButtonX = currentX - CONFIG.weightButtonSize;
@@ -1834,6 +2069,32 @@ const DOM_CSS = `
 .pp-edit-area textarea:focus {
     border-color: color-mix(in srgb, var(--input-text, #ddd) 60%, transparent);
 }
+.pp-prefix-area {
+    padding: 4px 6px;
+    border-bottom: 1px solid var(--border-color, #4e4e4e);
+}
+.pp-prefix-label {
+    font-size: 11px;
+    color: color-mix(in srgb, var(--input-text, #ddd) 70%, transparent);
+    margin-bottom: 2px;
+}
+.pp-prefix-area textarea {
+    width: 100%;
+    min-height: 48px;
+    font-family: monospace;
+    font-size: 13px;
+    background: var(--comfy-input-bg, #222);
+    color: var(--input-text, #ddd);
+    border: 1px solid var(--border-color, #4e4e4e);
+    border-radius: 4px;
+    padding: 4px 6px;
+    resize: vertical;
+    outline: none;
+    box-sizing: border-box;
+}
+.pp-prefix-area textarea:focus {
+    border-color: color-mix(in srgb, var(--input-text, #ddd) 60%, transparent);
+}
 .pp-separator-row {
     display: flex;
     align-items: center;
@@ -1909,6 +2170,10 @@ function createDOMWidget(node, textWidget, app) {
         const text = textWidget.value || "";
         container.innerHTML = '';
 
+        // Prefix textarea is always rendered at the very top — it represents
+        // pre-text and stays visible in both display and edit modes.
+        renderPrefixArea(container);
+
         if (node._ppDomEditMode) {
             renderEditMode(container, text);
         } else {
@@ -1925,7 +2190,7 @@ function createDOMWidget(node, textWidget, app) {
         saveBtn.textContent = 'Save';
         saveBtn.addEventListener('click', (e) => {
             e.stopPropagation();
-            // Read back textarea value
+            // Read back main textarea value (prefix textarea writes through on input)
             const ta = el.querySelector('.pp-edit-area textarea');
             if (ta) textWidget.value = ta.value;
             node._ppDomEditMode = false;
@@ -1946,8 +2211,25 @@ function createDOMWidget(node, textWidget, app) {
         editArea.appendChild(textarea);
         el.appendChild(editArea);
 
-        // Separator & options row
+        // Separator & options row (includes prefix_separator toggle)
         renderOptionsRow(el);
+    }
+
+    function renderPrefixArea(el) {
+        const wrap = document.createElement('div');
+        wrap.className = 'pp-prefix-area';
+        const label = document.createElement('div');
+        label.className = 'pp-prefix-label';
+        label.textContent = 'Prefix:';
+        wrap.appendChild(label);
+        const ta = document.createElement('textarea');
+        ta.value = getWidgetValue('prefix') || '';
+        ta.addEventListener('keydown', (e) => e.stopPropagation());
+        ta.addEventListener('input', () => {
+            setWidgetValue('prefix', ta.value);
+        });
+        wrap.appendChild(ta);
+        el.appendChild(wrap);
     }
 
     function renderOptionsRow(el) {
@@ -1973,6 +2255,7 @@ function createDOMWidget(node, textWidget, app) {
             { name: 'trailing_separator', label: 'Trail' },
             { name: 'separator_newline', label: 'Sep NL' },
             { name: 'add_newline', label: 'End NL' },
+            { name: 'prefix_separator', label: 'Prefix Sep' },
         ];
         for (const opt of options) {
             const label = document.createElement('label');
@@ -2773,6 +3056,48 @@ function drawScrollBar(ctx, x, y, width, height, scrollOffset, maxScrollOffset, 
         w: CONFIG.scrollBarWidth,
         h: CONFIG.scrollButtonHeight,
         action: 'scroll_down'
+    });
+}
+
+function drawCheckboxScrollBar(ctx, node, colors) {
+    const scroll = node._ppCheckboxScroll;
+    if (!scroll || scroll.maxScrollLines <= 0) return;
+
+    const scrollBarX = node.size[0] - CONFIG.sideNodePadding - CONFIG.scrollBarWidth;
+    const scrollBarY = scroll.areaTop;
+    const totalH = Math.max(CONFIG.scrollButtonHeight * 2 + 16, scroll.areaHeight);
+
+    // Up button
+    drawScrollButton(ctx, scrollBarX, scrollBarY, CONFIG.scrollBarWidth, CONFIG.scrollButtonHeight, '▲', colors);
+    node.clickableAreas.push({
+        x: scrollBarX, y: scrollBarY,
+        w: CONFIG.scrollBarWidth, h: CONFIG.scrollButtonHeight,
+        action: 'cb_scroll_up'
+    });
+
+    // Track
+    const trackY = scrollBarY + CONFIG.scrollButtonHeight;
+    const trackHeight = Math.max(0, totalH - CONFIG.scrollButtonHeight * 2);
+    ctx.fillStyle = "#2a2a2a";
+    ctx.fillRect(scrollBarX, trackY, CONFIG.scrollBarWidth, trackHeight);
+    ctx.strokeStyle = colors.borderColor;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(scrollBarX, trackY, CONFIG.scrollBarWidth, trackHeight);
+
+    // Thumb (size proportional to visible-to-total ratio)
+    const visibleRatio = scroll.visibleLines / (scroll.maxScrollLines + scroll.visibleLines);
+    const thumbHeight = Math.max(16, trackHeight * visibleRatio);
+    const thumbY = trackY + (trackHeight - thumbHeight) * (scroll.scrollOffset / scroll.maxScrollLines);
+    ctx.fillStyle = "#555555";
+    ctx.fillRect(scrollBarX + 1, thumbY, CONFIG.scrollBarWidth - 2, thumbHeight);
+
+    // Down button
+    const downButtonY = trackY + trackHeight;
+    drawScrollButton(ctx, scrollBarX, downButtonY, CONFIG.scrollBarWidth, CONFIG.scrollButtonHeight, '▼', colors);
+    node.clickableAreas.push({
+        x: scrollBarX, y: downButtonY,
+        w: CONFIG.scrollBarWidth, h: CONFIG.scrollButtonHeight,
+        action: 'cb_scroll_down'
     });
 }
 

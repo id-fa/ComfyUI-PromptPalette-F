@@ -34,11 +34,6 @@ class PromptPalette_F(BaseNodeClass):
                         multiline=True
                     ),
                     io.String.Input(
-                        "prefix",
-                        optional=True,
-                        force_input=True
-                    ),
-                    io.String.Input(
                         "separator",
                         default=", "
                     ),
@@ -59,6 +54,16 @@ class PromptPalette_F(BaseNodeClass):
                         optional=True,
                         default=""
                     ),
+                    io.String.Input(
+                        "prefix",
+                        optional=True,
+                        default="",
+                        multiline=True
+                    ),
+                    io.Boolean.Input(
+                        "prefix_separator",
+                        default=False
+                    ),
                 ],
                 outputs=[io.String.Output()]
             )
@@ -74,12 +79,13 @@ class PromptPalette_F(BaseNodeClass):
                 )
             },
             "optional": {
-                "prefix": ("STRING", {"forceInput": True}),
                 "separator": ("STRING", {"default": ", "}),
                 "trailing_separator": ("BOOLEAN", {"default": False}),
                 "separator_newline": ("BOOLEAN", {"default": False}),
                 "add_newline": ("BOOLEAN", {"default": False}),
                 "preview_override": ("STRING", {"default": ""}),
+                "prefix": ("STRING", {"default": "", "multiline": True}),
+                "prefix_separator": ("BOOLEAN", {"default": False}),
             },
         }
 
@@ -104,9 +110,9 @@ class PromptPalette_F(BaseNodeClass):
         return line.strip()
 
     @classmethod
-    def execute(cls, text, prefix=None, separator=", ", add_newline=False,
+    def execute(cls, text, prefix="", separator=", ", add_newline=False,
                 separator_newline=False, trailing_separator=False,
-                preview_override="") -> io.NodeOutput:
+                preview_override="", prefix_separator=False) -> io.NodeOutput:
         # If preview_override is set, return it directly (temporary edit)
         if preview_override:
             if V3_AVAILABLE:
@@ -141,12 +147,13 @@ class PromptPalette_F(BaseNodeClass):
             result = effective_separator.join(filtered_lines)
 
         if prefix:
-            if separator == "":
-                result = prefix + result
-            else:
-                # Use the same effective separator for prefix
+            # Only insert separator between prefix and content when explicitly
+            # requested AND both sides have content; otherwise plain concat.
+            if prefix_separator and separator != "" and filtered_lines:
                 effective_separator = separator + "\n" if separator_newline else separator
                 result = prefix + effective_separator + result
+            else:
+                result = prefix + result
 
         # Add trailing separator if requested
         if trailing_separator and separator != "" and filtered_lines:
