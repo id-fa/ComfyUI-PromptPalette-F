@@ -508,6 +508,17 @@ This project includes `pyproject.toml` for ComfyUI registry publication followin
 
 ## Fixed Issues
 
+### Nodes 2.0 Mode Setting Persistence (Resolved - May 20, 2026)
+- **Issue**: In Nodes 2.0 mode, the following settings were not persisted across save/reload:
+  - `separator` (Sep field) — reverted to default `", "` after reload (or in some cross-mode flows, displayed as `"edit_text"`)
+  - `trailing_separator` (Trail), `separator_newline` (Sep NL), `add_newline` (End NL) — reverted to `false` after reload
+  - Settings only worked for the current session (in-memory) but were lost on workflow save
+- **Root Cause**: In Nodes 2.0 mode, the standard widgets (`text`, `separator`, `trailing_separator`, `separator_newline`, `add_newline`, `preview_override`) are removed from `node.widgets` array (since `widget.hidden = true` doesn't work in Vue rendering) and backed up in `node._ppWidgetRefs`. However, LiteGraph's `serialize()` walks `node.widgets` to build `widgets_values`, so the backed-up widgets were excluded from serialization. The `edit_text` artifact appeared when Classic-mode-saved workflows (which serialized button widget values like `"edit_text"`) were re-saved in Nodes 2.0 mode, causing widget_values ordering misalignment on subsequent reload
+- **Solution**: Extended the `serialize()` override in `web/index.js:612` to temporarily restore `_ppWidgetRefs` widgets into `node.widgets` (in INPUT_TYPES order: text → separator → trailing_separator → separator_newline → add_newline → preview_override) before calling the original serialize, then restore the original widgets array afterward. This ensures `widgets_values` is generated with the correct values and order so that `configure()` on reload maps them back correctly
+- **Why INPUT_TYPES order matters**: LiteGraph's `configure()` maps `widgets_values[i]` to `node.widgets[i].value` by index, not by name. Maintaining the same order on serialize and on widget re-creation guarantees correct restoration
+- **Status**: ✅ Resolved
+- **Code Location**: `web/index.js:610-649` (serialize override)
+
 ### Window Size Stability on Tab Switch (Resolved - January 23, 2026)
 - **Issue**: Node window size would change unpredictably when switching between workflow tabs
   - Symptom 1: Node would become tall and narrow (width decreased significantly)

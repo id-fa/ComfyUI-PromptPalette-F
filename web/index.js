@@ -610,7 +610,36 @@ app.registerExtension({
         // serialize override - save node state
         const origSerialize = nodeType.prototype.serialize;
         nodeType.prototype.serialize = function() {
+            // Nodes 2.0 mode: standard widgets are removed from node.widgets array
+            // (since hidden=true doesn't work in Vue rendering) and backed up in _ppWidgetRefs.
+            // LiteGraph's serialize() walks node.widgets to build widgets_values, so without
+            // this temporary restore, all settings (separator/trailing/sep_nl/end_nl) would
+            // be lost on save and reset to defaults on reload.
+            const refs = this._ppWidgetRefs;
+            let originalWidgets = null;
+
+            if (refs && this.widgets) {
+                originalWidgets = [...this.widgets];
+
+                // Order must match INPUT_TYPES order so configure() maps widgets_values back correctly
+                const orderedNames = ['text', 'separator', 'trailing_separator', 'separator_newline', 'add_newline', 'preview_override'];
+                const refsToRestore = [];
+                for (const name of orderedNames) {
+                    if (refs[name]) {
+                        refsToRestore.push(refs[name]);
+                    }
+                }
+
+                // Place refs widgets first (INPUT_TYPES order). DOM widget has serialize:false
+                // so its position doesn't affect widgets_values.
+                this.widgets = [...refsToRestore, ...originalWidgets];
+            }
+
             const data = origSerialize ? origSerialize.apply(this, arguments) : {};
+
+            if (originalWidgets !== null) {
+                this.widgets = originalWidgets;
+            }
 
             // Save custom state
             data.isEditMode = this.isEditMode || false;
