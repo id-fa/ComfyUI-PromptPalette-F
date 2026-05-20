@@ -113,6 +113,14 @@ class PromptPalette_F(BaseNodeClass):
     def execute(cls, text, prefix="", separator=", ", add_newline=False,
                 separator_newline=False, trailing_separator=False,
                 preview_override="", prefix_separator=False) -> io.NodeOutput:
+        # Defensive coercion: prefix can occasionally arrive as a non-string
+        # (e.g. boolean False from a widget whose value got out of sync, or
+        # from an older save where a BOOLEAN widget occupied this input
+        # position). Without this guard, str(False) would yield "False" and
+        # it would be prepended to the output.
+        if not isinstance(prefix, str):
+            prefix = ""
+
         # If preview_override is set, return it directly (temporary edit)
         if preview_override:
             if V3_AVAILABLE:

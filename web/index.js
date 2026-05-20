@@ -227,6 +227,26 @@ app.registerExtension({
                     const ds = canvas.ds;
                     if (!ds) return;
 
+                    // First: Nodes 2.0 DOM widget phrase list scrolling.
+                    // ComfyUI's canvas zoom handler uses cursor position (not
+                    // event.target) to decide what to do, so it would zoom even
+                    // when the cursor is over our HTML overlay. Catch wheel events
+                    // inside `.pp-phrases` here in capture phase, manually scroll
+                    // the element, and stopImmediatePropagation so the zoom never
+                    // runs. preventDefault avoids page-level scrolling.
+                    const target = event.target;
+                    if (target && target.closest) {
+                        const phrasesEl = target.closest('.pp-phrases');
+                        if (phrasesEl) {
+                            const before = phrasesEl.scrollTop;
+                            phrasesEl.scrollTop = before + (event.deltaY || 0);
+                            event.preventDefault();
+                            event.stopPropagation();
+                            if (event.stopImmediatePropagation) event.stopImmediatePropagation();
+                            return;
+                        }
+                    }
+
                     // Bail if the wheel happened over a different element
                     // (textarea inside an HTML widget, toolbar, etc.). Only
                     // intercept when the cursor is truly over the graph canvas.
@@ -330,6 +350,14 @@ app.registerExtension({
                     prefixWidget.computeSize = function() {
                         return [0, 52];
                     };
+                    // Defensive: ensure prefix is always a string. Some ComfyUI
+                    // versions / migration paths can leave a multiline STRING
+                    // widget with a non-string value (notably boolean false),
+                    // which then stringifies to "False" on the Python side and
+                    // gets prepended to the output.
+                    if (typeof prefixWidget.value !== 'string') {
+                        prefixWidget.value = '';
+                    }
                 }
                 if (prefixSeparatorWidget) prefixSeparatorWidget.hidden = true;
 
@@ -618,14 +646,18 @@ app.registerExtension({
                     this._promptPalette_nodes2HelpWidget2 = null;
 
                     // Remove standard widgets from array (hidden property doesn't work in Nodes 2.0)
-                    // Store references in _ppWidgetRefs so DOM UI and queuePrompt patch can access values
+                    // Store references in _ppWidgetRefs so DOM UI and queuePrompt patch can access values.
+                    // IMPORTANT: `prefix` is intentionally KEPT in node.widgets[] so that ComfyUI's
+                    // automatic widget-to-input slot conversion (Nodes 2.0 behavior) still works —
+                    // removing it would make the prefix slot disappear and prevent wires from
+                    // connecting to it. The native widget renders at the top of the node because
+                    // reorderPrefixToTop() placed it at widgets[0], which is what we want.
                     const textWidget = findTextWidget(this);
                     const separatorWidget = findSeparatorWidget(this);
                     const newlineWidget = findNewlineWidget(this);
                     const separatorNewlineWidget = findSeparatorNewlineWidget(this);
                     const trailingSeparatorWidget = findTrailingSeparatorWidget(this);
                     const overrideWidgetNodes2 = findOverrideWidget(this);
-                    const prefixWidgetNodes2 = findPrefixWidget(this);
                     const prefixSeparatorWidgetNodes2 = findPrefixSeparatorWidget(this);
 
                     this._ppWidgetRefs = {
@@ -635,16 +667,17 @@ app.registerExtension({
                         separator_newline: separatorNewlineWidget,
                         trailing_separator: trailingSeparatorWidget,
                         preview_override: overrideWidgetNodes2,
-                        prefix: prefixWidgetNodes2,
                         prefix_separator: prefixSeparatorWidgetNodes2,
+                        // NOTE: no `prefix` here — the native widget stays in node.widgets[]
+                        // and serializes/links through the standard path.
                     };
 
                     if (this.widgets) {
                         const removeSet = new Set([
                             textWidget, separatorWidget, newlineWidget,
                             separatorNewlineWidget, trailingSeparatorWidget,
-                            overrideWidgetNodes2, prefixWidgetNodes2,
-                            prefixSeparatorWidgetNodes2,
+                            overrideWidgetNodes2, prefixSeparatorWidgetNodes2,
+                            // NOTE: prefixWidget intentionally NOT removed (slot connection)
                         ].filter(Boolean));
                         this.widgets = this.widgets.filter(w => !removeSet.has(w));
                     }
@@ -842,10 +875,16 @@ function reorderPrefixToTop(node) {
 // Workflows saved before prefix became a widget had button labels
 // ("edit_text"/"toggle_preview") slotted into the indices now occupied by prefix
 // and prefix_separator. Reset them to defaults on first load.
+// Also catches non-string prefix values (e.g. boolean false leaked in from
+// an older widget at the same index, or from a stale Nodes 2.0 _ppWidgetRefs
+// snapshot) — these would otherwise stringify to "False" on the backend.
 function sanitizeLegacyPrefixValues(node) {
     const prefixW = findWidgetByName(node, 'prefix');
-    if (prefixW && (prefixW.value === 'edit_text' || prefixW.value === 'toggle_preview')) {
-        prefixW.value = '';
+    if (prefixW) {
+        const v = prefixW.value;
+        if (typeof v !== 'string' || v === 'edit_text' || v === 'toggle_preview') {
+            prefixW.value = '';
+        }
     }
     const prefixSepW = findWidgetByName(node, 'prefix_separator');
     if (prefixSepW && typeof prefixSepW.value !== 'boolean') {
@@ -1917,6 +1956,25 @@ const DOM_CSS = `
 }
 .pp-phrases {
     padding: 2px 0;
+    /* Cap the phrase list so a huge number of choices scrolls instead of
+       making the entire node enormous. Native browser scrolling — wheel
+       events on this element are NOT intercepted by our document-level
+       wheel hook (target check), so they scroll natively. */
+    max-height: 400px;
+    overflow-y: auto;
+}
+.pp-phrases::-webkit-scrollbar {
+    width: 10px;
+}
+.pp-phrases::-webkit-scrollbar-track {
+    background: color-mix(in srgb, var(--comfy-input-bg, #222) 80%, transparent);
+}
+.pp-phrases::-webkit-scrollbar-thumb {
+    background: color-mix(in srgb, var(--input-text, #ddd) 30%, transparent);
+    border-radius: 5px;
+}
+.pp-phrases::-webkit-scrollbar-thumb:hover {
+    background: color-mix(in srgb, var(--input-text, #ddd) 50%, transparent);
 }
 .pp-row {
     display: flex;
@@ -2168,16 +2226,32 @@ function createDOMWidget(node, textWidget, app) {
 
     function render() {
         const text = textWidget.value || "";
+
+        // Preserve the phrase-list scroll position across re-renders so that
+        // toggling a checkbox (which wipes and rebuilds the DOM) doesn't snap
+        // the list back to the top.
+        const prevPhrases = container.querySelector('.pp-phrases');
+        const savedScrollTop = prevPhrases ? prevPhrases.scrollTop : 0;
+
         container.innerHTML = '';
 
-        // Prefix textarea is always rendered at the very top — it represents
-        // pre-text and stays visible in both display and edit modes.
-        renderPrefixArea(container);
+        // NOTE: In Nodes 2.0 the prefix textarea is rendered by ComfyUI itself
+        // as a native multiline widget (kept in node.widgets[0] so its input
+        // slot is wire-connectable). We deliberately do NOT render a prefix
+        // area inside this DOM widget — having two textareas with different
+        // values would be confusing.
 
         if (node._ppDomEditMode) {
             renderEditMode(container, text);
         } else {
             renderDisplayMode(container, text);
+        }
+
+        // Restore scroll position (display mode only — edit mode has a textarea
+        // instead of a phrase list).
+        if (savedScrollTop > 0 && !node._ppDomEditMode) {
+            const newPhrases = container.querySelector('.pp-phrases');
+            if (newPhrases) newPhrases.scrollTop = savedScrollTop;
         }
     }
 
