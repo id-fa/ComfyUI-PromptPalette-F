@@ -62,12 +62,17 @@ model \[v2.1\] settings [model21]
 ```
 
 ### 設定項目
+
+Nodes 2.0モードでは編集モード時の設定行に省略表示されます。括弧内が省略名。
+
 - **text** - メインの入力テキスト（1行に1フレーズ）
 - **prefix** - テキストの前に置く文字列（複数ノード連結用）
-- **separator** - フレーズを結合する際の区切り文字（デフォルト：`, `）
-- **trailing_separator** - 最後のフレーズの後にも区切り文字を追加
-- **separator_newline** - 各区切り文字の後に改行を追加
-- **add_newline** - 最終出力の末尾に改行を追加
+- **separator** （`Sep`） - フレーズを結合する際の区切り文字（デフォルト：`, `）
+- **trailing_separator** （`Trail`） - 最後のフレーズの後にも区切り文字を追加
+- **separator_newline** （`Sep NL`） - 各区切り文字の後に改行を追加
+- **add_newline** （`End NL`） - 最終出力の末尾に改行を追加
+- **prefix_separator** （`Prefix Sep`） - prefix と本文の間に separator を挿入する（デフォルトOFF。OFFなら `prefix + 本文` がそのまま連結される）
+- **empty_when_no_selection** （`Empty if no sel`） - 選択されているフレーズが1つもない時に、出力(text / selected_text / selected_list)をすべて Python `None` にする。prefix も改行も出力されない。下流で [rgthree Any Switch](https://github.com/rgthree/rgthree-comfy) などの `value is None` を判定するスイッチに繋いで、選択ゼロ時に別の入力へルーティングする用途を想定（デフォルトOFF）
 
 ## 関連
 
@@ -144,4 +149,17 @@ model \[v2.1\] settings [model21]
 ```
 beautiful landscape, sunset colors, anime girl, high quality, model [v2.1] settings
 ```
+
+### Settings
+
+In Nodes 2.0 mode these appear as short labels in the edit-mode options row. The parenthesized name is what shows up in that UI.
+
+- **text** — main input text (one phrase per line)
+- **prefix** — text prepended before the body (for chaining multiple nodes)
+- **separator** (`Sep`) — separator used to join phrases (default: `, `)
+- **trailing_separator** (`Trail`) — also append the separator after the last phrase
+- **separator_newline** (`Sep NL`) — append a newline after each separator
+- **add_newline** (`End NL`) — append a newline at the very end of the output
+- **prefix_separator** (`Prefix Sep`) — insert `separator` between `prefix` and the body (default OFF; when OFF, `prefix + body` is concatenated as-is)
+- **empty_when_no_selection** (`Empty if no sel`) — when no phrase is selected, return Python `None` for all three outputs (text / selected_text / selected_list). `prefix` and trailing newlines are NOT emitted. Intended for downstream switches that check `value is None` (e.g. [rgthree Any Switch](https://github.com/rgthree/rgthree-comfy)) to route to a different input when nothing is selected (default OFF)
 

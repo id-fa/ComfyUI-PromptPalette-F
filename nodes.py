@@ -64,8 +64,16 @@ class PromptPalette_F(BaseNodeClass):
                         "prefix_separator",
                         default=False
                     ),
+                    io.Boolean.Input(
+                        "empty_when_no_selection",
+                        default=False
+                    ),
                 ],
-                outputs=[io.String.Output()]
+                outputs=[
+                    io.String.Output(display_name="text"),
+                    io.String.Output(display_name="selected_text"),
+                    io.String.Output(display_name="selected_list"),
+                ]
             )
 
     # V1 API INPUT_TYPES (always available)
@@ -79,17 +87,41 @@ class PromptPalette_F(BaseNodeClass):
                 )
             },
             "optional": {
-                "separator": ("STRING", {"default": ", "}),
-                "trailing_separator": ("BOOLEAN", {"default": False}),
-                "separator_newline": ("BOOLEAN", {"default": False}),
-                "add_newline": ("BOOLEAN", {"default": False}),
+                "separator": ("STRING", {
+                    "default": ", ",
+                    "tooltip": "Separator used to join selected phrases (default: \", \"). Use empty string for no separator.",
+                }),
+                "trailing_separator": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Append the separator after the last phrase too.",
+                }),
+                "separator_newline": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Append a newline after each separator (one phrase per line in output).",
+                }),
+                "add_newline": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Append a newline at the very end of the output.",
+                }),
                 "preview_override": ("STRING", {"default": ""}),
-                "prefix": ("STRING", {"default": "", "multiline": True}),
-                "prefix_separator": ("BOOLEAN", {"default": False}),
+                "prefix": ("STRING", {
+                    "default": "",
+                    "multiline": True,
+                    "tooltip": "Text prepended before the joined body. Useful for chaining multiple nodes.",
+                }),
+                "prefix_separator": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Insert the separator between prefix and body. OFF = plain prefix+body concat.",
+                }),
+                "empty_when_no_selection": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "When no phrase is selected, output Python None on all three outputs (no prefix, no newline). Targets switches like rgthree Any Switch that check `value is None` to route to another input.",
+                }),
             },
         }
 
-    RETURN_TYPES = ("STRING",)
+    RETURN_TYPES = ("STRING", "STRING", "LIST")
+    RETURN_NAMES = ("text", "selected_text", "selected_list")
     FUNCTION = "execute"
     CATEGORY = "utils"
 
@@ -109,10 +141,25 @@ class PromptPalette_F(BaseNodeClass):
 
         return line.strip()
 
+    @staticmethod
+    def strip_weight_notation(phrase):
+        """Strip weight notation: (text:1.5) -> text. Handles nested parens by
+        repeatedly unwrapping outermost (...:number). Plain parens like (text)
+        without a numeric weight are left intact."""
+        prev = None
+        current = phrase.strip()
+        while prev != current:
+            prev = current
+            m = re.fullmatch(r'\(\s*(.+?)\s*:\s*-?\d*\.?\d+\s*\)', current)
+            if m:
+                current = m.group(1).strip()
+        return current
+
     @classmethod
     def execute(cls, text, prefix="", separator=", ", add_newline=False,
                 separator_newline=False, trailing_separator=False,
-                preview_override="", prefix_separator=False) -> io.NodeOutput:
+                preview_override="", prefix_separator=False,
+                empty_when_no_selection=False):
         # Defensive coercion: prefix can occasionally arrive as a non-string
         # (e.g. boolean False from a widget whose value got out of sync, or
         # from an older save where a BOOLEAN widget occupied this input
@@ -120,13 +167,6 @@ class PromptPalette_F(BaseNodeClass):
         # it would be prepended to the output.
         if not isinstance(prefix, str):
             prefix = ""
-
-        # If preview_override is set, return it directly (temporary edit)
-        if preview_override:
-            if V3_AVAILABLE:
-                return io.NodeOutput(preview_override)
-            else:
-                return (preview_override,)
 
         lines = text.split("\n")
         filtered_lines = []
@@ -144,6 +184,41 @@ class PromptPalette_F(BaseNodeClass):
             line = cls.remove_group_tags_with_escape(line)
             if line:  # Only add non-empty lines after tag removal
                 filtered_lines.append(line)
+
+        # Build the selected-words list (weights stripped).
+        # This output reflects the actual selection regardless of
+        # prefix/separator/preview_override settings.
+        selected_list = [cls.strip_weight_notation(p) for p in filtered_lines]
+        selected_list = [p for p in selected_list if p]
+        selected_text = "\n".join(selected_list)
+
+        # If preview_override is set, the main text output uses the override
+        # directly (temporary edit). The list outputs still reflect the real
+        # selection so downstream nodes can keep using them.
+        # preview_override always wins over empty_when_no_selection — if the
+        # user has explicitly edited preview content, that's their intent.
+        if preview_override:
+            if V3_AVAILABLE:
+                return io.NodeOutput(preview_override, selected_text, selected_list)
+            else:
+                return (preview_override, selected_text, selected_list)
+
+        # Empty-selection short-circuit: when the user enables
+        # `empty_when_no_selection` and no phrase survived filtering (no
+        # `//`-active line), emit Python None on every output. This is
+        # the value that switch / router nodes (e.g. rgthree's Any Switch,
+        # which does `value is None`) treat as "skip this input". The
+        # downstream execution still RUNS (unlike ExecutionBlocker) so
+        # individual switch/conditional nodes can decide what to do —
+        # they typically pass through the next non-None input.
+        # NOTE: downstream nodes that don't handle None gracefully may
+        # error on this value. Users connecting to such nodes should keep
+        # the toggle OFF, or insert a switch/None-handler in between.
+        if empty_when_no_selection and not filtered_lines:
+            if V3_AVAILABLE:
+                return io.NodeOutput(None, None, None)
+            else:
+                return (None, None, None)
 
         # Join with custom separator
         if separator == "":
@@ -177,9 +252,9 @@ class PromptPalette_F(BaseNodeClass):
 
         # Return format depends on API version
         if V3_AVAILABLE:
-            return io.NodeOutput(result)
+            return io.NodeOutput(result, selected_text, selected_list)
         else:
-            return (result,)
+            return (result, selected_text, selected_list)
 
 
 # V3 Extension entrypoint (only if V3 is available)

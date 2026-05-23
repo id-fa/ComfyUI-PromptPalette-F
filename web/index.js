@@ -152,6 +152,169 @@ function toggleAllPhrases(text, activate) {
 }
 
 // ========================================
+// Classic-mode widget hover tooltips
+// ========================================
+// LiteGraph's canvas-rendered widgets don't expose a native tooltip system, so
+// we paint our own. A single DOM overlay follows the mouse and shows the
+// per-widget help text after a short hover delay. Nodes 2.0 mode uses HTML
+// `title` attributes natively, so this only kicks in for Classic mode.
+
+const WIDGET_TOOLTIPS = {
+    text: 'Main phrase list. One phrase per line. Lines starting with `//` are commented out (OFF). Lines starting with `#` are description comments shown above the next phrase.',
+    separator: 'Separator used to join selected phrases (default: ", "). Use empty string for no separator.',
+    trailing_separator: 'Append the separator after the last phrase too.',
+    separator_newline: 'Append a newline after each separator (one phrase per line in output).',
+    add_newline: 'Append a newline at the very end of the output.',
+    prefix: 'Text prepended before the joined body. Useful for chaining multiple nodes.',
+    prefix_separator: 'Insert the separator between prefix and body. OFF = plain prefix+body concat.',
+    empty_when_no_selection: 'When no phrase is selected, output Python None on all three outputs (no prefix, no newline). Targets switches like rgthree Any Switch that check `value is None` to route to another input.',
+};
+
+let _ppTooltipEl = null;
+let _ppTooltipShowTimer = null;
+let _ppTooltipCurrentName = null;
+
+function _ppGetTooltipEl() {
+    if (_ppTooltipEl) return _ppTooltipEl;
+    const el = document.createElement('div');
+    el.className = 'pp-canvas-tooltip';
+    el.style.cssText = `
+        position: fixed;
+        background: rgba(20, 20, 30, 0.96);
+        color: #e8e8e8;
+        border: 1px solid var(--border-color, #4e4e4e);
+        border-radius: 4px;
+        padding: 6px 10px;
+        font-size: 12px;
+        font-family: sans-serif;
+        max-width: 320px;
+        pointer-events: none;
+        z-index: 10001;
+        display: none;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.6);
+        line-height: 1.4;
+        white-space: normal;
+    `;
+    document.body.appendChild(el);
+    _ppTooltipEl = el;
+    return el;
+}
+
+function _ppHideTooltip() {
+    if (_ppTooltipShowTimer) {
+        clearTimeout(_ppTooltipShowTimer);
+        _ppTooltipShowTimer = null;
+    }
+    if (_ppTooltipEl) _ppTooltipEl.style.display = 'none';
+    _ppTooltipCurrentName = null;
+}
+
+function _ppShowTooltipAt(text, clientX, clientY) {
+    const el = _ppGetTooltipEl();
+    el.textContent = text;
+    el.style.display = 'block';
+    // Clamp to viewport so the tooltip never spills off-screen
+    const rect = el.getBoundingClientRect();
+    let left = clientX + 14;
+    let top = clientY + 18;
+    if (left + rect.width > window.innerWidth - 8) {
+        left = Math.max(8, window.innerWidth - rect.width - 8);
+    }
+    if (top + rect.height > window.innerHeight - 8) {
+        top = Math.max(8, clientY - rect.height - 12);
+    }
+    el.style.left = left + 'px';
+    el.style.top = top + 'px';
+}
+
+function installClassicTooltipListener(app) {
+    if (window.__ppPromptPaletteTooltipHooked) return;
+    window.__ppPromptPaletteTooltipHooked = true;
+
+    document.addEventListener('mousemove', (e) => {
+        try {
+            const canvas = app.canvas;
+            const canvasEl = canvas && canvas.canvas;
+            // Only react when the mouse is over the LiteGraph canvas itself —
+            // not over HTML overlays (DOM widget, preview editor, etc.).
+            if (!canvasEl || e.target !== canvasEl) {
+                _ppHideTooltip();
+                return;
+            }
+
+            const ds = canvas.ds;
+            if (!ds) { _ppHideTooltip(); return; }
+
+            const rect = canvasEl.getBoundingClientRect();
+            const cx = e.clientX - rect.left;
+            const cy = e.clientY - rect.top;
+            const graphX = cx / ds.scale - ds.offset[0];
+            const graphY = cy / ds.scale - ds.offset[1];
+
+            const node = app.graph && app.graph.getNodeOnPos
+                ? app.graph.getNodeOnPos(graphX, graphY)
+                : null;
+            if (!node || node.type !== 'PromptPalette_F' || !node.widgets) {
+                _ppHideTooltip();
+                return;
+            }
+            if (node.flags && node.flags.collapsed) { _ppHideTooltip(); return; }
+
+            const nodeLocalY = graphY - node.pos[1];
+
+            // Find which visible widget (with a registered tooltip) the cursor
+            // is over, using widget.last_y (set by LiteGraph at draw time).
+            let hovered = null;
+            for (const w of node.widgets) {
+                if (w.hidden) continue;
+                if (typeof w.last_y !== 'number') continue;
+                if (!WIDGET_TOOLTIPS[w.name]) continue;
+                let h = 20;
+                if (w.computeSize) {
+                    const sz = w.computeSize(node.size[0]);
+                    if (sz && typeof sz[1] === 'number') h = sz[1];
+                }
+                if (nodeLocalY >= w.last_y && nodeLocalY < w.last_y + h) {
+                    hovered = w;
+                    break;
+                }
+            }
+
+            if (!hovered) {
+                _ppHideTooltip();
+                return;
+            }
+
+            const text = WIDGET_TOOLTIPS[hovered.name];
+
+            // Same widget as before — either the tooltip is already shown
+            // (just follow the cursor) or its delay timer is still counting
+            // (let it finish — do NOT reset on every mousemove, otherwise
+            // the timer never fires while the mouse drifts within the widget).
+            if (_ppTooltipCurrentName === hovered.name) {
+                if (_ppTooltipEl && _ppTooltipEl.style.display === 'block') {
+                    _ppShowTooltipAt(text, e.clientX, e.clientY);
+                }
+                return;
+            }
+
+            // Different widget than last time — cancel any pending show and
+            // hide any current tooltip, then schedule a delayed show.
+            if (_ppTooltipShowTimer) clearTimeout(_ppTooltipShowTimer);
+            if (_ppTooltipEl) _ppTooltipEl.style.display = 'none';
+            _ppTooltipCurrentName = hovered.name;
+            const x = e.clientX, y = e.clientY;
+            _ppTooltipShowTimer = setTimeout(() => {
+                _ppShowTooltipAt(text, x, y);
+                _ppTooltipShowTimer = null;
+            }, 500);
+        } catch (err) {
+            // Defensive — never let tooltip logic break the canvas mouse path
+        }
+    }, { capture: false, passive: true });
+}
+
+// ========================================
 // Extension Registration - Adaptive Mode
 // ========================================
 
@@ -173,6 +336,14 @@ app.registerExtension({
             }
         } catch (e) {
             console.warn("[PromptPalette_F] Failed to hook graph.clear:", e);
+        }
+
+        // Install Classic-mode widget hover tooltip handler (DOM overlay since
+        // LiteGraph's canvas-drawn widgets don't expose a native tooltip system).
+        try {
+            installClassicTooltipListener(app);
+        } catch (e) {
+            console.warn("[PromptPalette_F] Failed to install tooltip listener:", e);
         }
 
         // Patch api.queuePrompt to inject widget values for Nodes 2.0 mode
@@ -327,6 +498,7 @@ app.registerExtension({
             const trailingSeparatorWidget = findTrailingSeparatorWidget(this);
             const prefixWidget = findPrefixWidget(this);
             const prefixSeparatorWidget = findPrefixSeparatorWidget(this);
+            const emptyWhenNoSelectionWidget = findEmptyWhenNoSelectionWidget(this);
 
             // Hide override widget if it exists (managed programmatically)
             const overrideWidget = findOverrideWidget(this);
@@ -360,6 +532,7 @@ app.registerExtension({
                     }
                 }
                 if (prefixSeparatorWidget) prefixSeparatorWidget.hidden = true;
+                if (emptyWhenNoSelectionWidget) emptyWhenNoSelectionWidget.hidden = true;
 
                 // Store reference to textWidget for later use
                 this._promptPalette_textWidget = textWidget;
@@ -467,6 +640,8 @@ app.registerExtension({
                 // prefix stays visible (always-on); prefix_separator only in edit mode
                 const prefixSeparatorWidgetClassic = findPrefixSeparatorWidget(this);
                 if (prefixSeparatorWidgetClassic) prefixSeparatorWidgetClassic.hidden = true;
+                const emptyWhenNoSelectionWidgetCls = findEmptyWhenNoSelectionWidget(this);
+                if (emptyWhenNoSelectionWidgetCls) emptyWhenNoSelectionWidgetCls.hidden = true;
 
                 // Force node height recalculation to show buttons (preserve width)
                 this.setSize([this.size[0], this.computeSize()[1]]);
@@ -659,6 +834,7 @@ app.registerExtension({
                     const trailingSeparatorWidget = findTrailingSeparatorWidget(this);
                     const overrideWidgetNodes2 = findOverrideWidget(this);
                     const prefixSeparatorWidgetNodes2 = findPrefixSeparatorWidget(this);
+                    const emptyWhenNoSelN2 = findEmptyWhenNoSelectionWidget(this);
 
                     this._ppWidgetRefs = {
                         text: textWidget,
@@ -668,6 +844,7 @@ app.registerExtension({
                         trailing_separator: trailingSeparatorWidget,
                         preview_override: overrideWidgetNodes2,
                         prefix_separator: prefixSeparatorWidgetNodes2,
+                        empty_when_no_selection: emptyWhenNoSelN2,
                         // NOTE: no `prefix` here — the native widget stays in node.widgets[]
                         // and serializes/links through the standard path.
                     };
@@ -677,6 +854,7 @@ app.registerExtension({
                             textWidget, separatorWidget, newlineWidget,
                             separatorNewlineWidget, trailingSeparatorWidget,
                             overrideWidgetNodes2, prefixSeparatorWidgetNodes2,
+                            emptyWhenNoSelN2,
                             // NOTE: prefixWidget intentionally NOT removed (slot connection)
                         ].filter(Boolean));
                         this.widgets = this.widgets.filter(w => !removeSet.has(w));
@@ -800,6 +978,25 @@ app.registerExtension({
                 origConfigure.apply(this, arguments);
             }
 
+            // Re-apply widgets_values using NAME-based mapping. origConfigure's
+            // default behavior is index-based (`widgets[i].value = widgets_values[i]`),
+            // which silently misaligns when a third-party extension (e.g.
+            // PromptPalette_F_Vue) injects extra widgets into node.widgets
+            // ahead of our named inputs. Our serialize override always writes
+            // widgets_values in PP_INPUT_ORDER, so we can safely walk that
+            // canonical order and overwrite per-name. Widgets that don't
+            // match a PP_INPUT_ORDER name (third-party widgets) keep whatever
+            // origConfigure assigned them.
+            if (info && Array.isArray(info.widgets_values)) {
+                const values = info.widgets_values;
+                for (let i = 0; i < PP_INPUT_ORDER.length && i < values.length; i++) {
+                    const widget = findWidgetByName(this, PP_INPUT_ORDER[i]);
+                    if (widget && values[i] !== undefined) {
+                        widget.value = values[i];
+                    }
+                }
+            }
+
             // Backward compat: pre-widget-prefix workflows had button labels
             // ("edit_text"/"toggle_preview") at the indices now occupied by prefix
             // and prefix_separator. Reset those before they reach the UI.
@@ -859,7 +1056,7 @@ function findWidgetByName(node, name) {
 
 // INPUT_TYPES order — used by serialize override and restoreInitialState to
 // map widgets_values entries to the correct widget regardless of display order.
-const PP_INPUT_ORDER = ['text', 'separator', 'trailing_separator', 'separator_newline', 'add_newline', 'preview_override', 'prefix', 'prefix_separator'];
+const PP_INPUT_ORDER = ['text', 'separator', 'trailing_separator', 'separator_newline', 'add_newline', 'preview_override', 'prefix', 'prefix_separator', 'empty_when_no_selection'];
 
 // Reorder widgets[] so the prefix textarea appears at the top of the node UI.
 // serialize override re-applies INPUT_TYPES order so this is purely cosmetic.
@@ -882,13 +1079,21 @@ function sanitizeLegacyPrefixValues(node) {
     const prefixW = findWidgetByName(node, 'prefix');
     if (prefixW) {
         const v = prefixW.value;
-        if (typeof v !== 'string' || v === 'edit_text' || v === 'toggle_preview') {
+        if (typeof v !== 'string' || v === 'edit_text' || v === 'toggle_preview' || v === 'set_all_weights') {
             prefixW.value = '';
         }
     }
     const prefixSepW = findWidgetByName(node, 'prefix_separator');
     if (prefixSepW && typeof prefixSepW.value !== 'boolean') {
         prefixSepW.value = false;
+    }
+    // empty_when_no_selection was appended after prefix_separator; loading a
+    // save from before this widget existed can land a stray button label
+    // string here. Also catches saves from the brief `false_when_empty`-named
+    // iteration of this same toggle.
+    const emptySelW = findWidgetByName(node, 'empty_when_no_selection');
+    if (emptySelW && typeof emptySelW.value !== 'boolean') {
+        emptySelW.value = false;
     }
 }
 
@@ -942,8 +1147,48 @@ function findPrefixSeparatorWidget(node) {
     return findWidgetByName(node, "prefix_separator");
 }
 
+function findEmptyWhenNoSelectionWidget(node) {
+    return findWidgetByName(node, "empty_when_no_selection");
+}
+
 function addEditButton(node, textWidget, app) {
     // This function is only called in Classic mode, so no mode checking needed
+
+    // Bulk-weight editor button (placed above Edit per user request).
+    // LiteGraph button callbacks don't receive a native event, so we compute
+    // an anchor from the button's actual rendered Y (`last_y`, set by
+    // LiteGraph at draw time) and the canvas transform.
+    let weightButton;
+    weightButton = node.addWidget("button", "Set All Weights", "set_all_weights", () => {
+        let anchor = null;
+        try {
+            const canvas = app.canvas;
+            const canvasEl = canvas && canvas.canvas;
+            if (canvasEl && canvas.ds) {
+                const rect = canvasEl.getBoundingClientRect();
+                const t = canvas.ds;
+                // Use the button's real rendered Y if available so the panel
+                // appears right below the button regardless of node position
+                // or other widgets above. Fall back to a small constant if
+                // the widget hasn't been drawn yet.
+                const buttonHeight = (typeof LiteGraph !== 'undefined' && LiteGraph.NODE_WIDGET_HEIGHT)
+                    ? LiteGraph.NODE_WIDGET_HEIGHT : 20;
+                const localY = (weightButton && typeof weightButton.last_y === 'number')
+                    ? weightButton.last_y + buttonHeight + 2
+                    : 40;
+                const graphX = node.pos[0] + 8;
+                const graphY = node.pos[1] + localY;
+                // LiteGraph DragAndScale convention:
+                //   canvasX = (graphX + offset[0]) * scale
+                anchor = {
+                    clientX: rect.left + (graphX + t.offset[0]) * t.scale,
+                    clientY: rect.top + (graphY + t.offset[1]) * t.scale,
+                };
+            }
+        } catch (e) { /* fall back to default position */ }
+        openBulkWeightEditor(node, anchor);
+    });
+
     const textButton = node.addWidget("button", "Edit", "edit_text", () => {
         node.isEditMode = !node.isEditMode;
         textWidget.hidden = !node.isEditMode;
@@ -967,6 +1212,10 @@ function addEditButton(node, textWidget, app) {
         const prefixSeparatorWidget = findPrefixSeparatorWidget(node);
         if (prefixSeparatorWidget) {
             prefixSeparatorWidget.hidden = !node.isEditMode;
+        }
+        const emptyWhenNoSelectionWidget = findEmptyWhenNoSelectionWidget(node);
+        if (emptyWhenNoSelectionWidget) {
+            emptyWhenNoSelectionWidget.hidden = !node.isEditMode;
         }
         textButton.name = node.isEditMode ? "Save" : "Edit";
         app.graph.setDirtyCanvas(true); // Redraw canvas
@@ -995,6 +1244,7 @@ function addEditButton(node, textWidget, app) {
     // Store references to Classic mode buttons
     node._promptPalette_editButton = textButton;
     node._promptPalette_previewButton = previewButton;
+    node._promptPalette_weightButton = weightButton;
     node._promptPalette_spacer = spacer;
 }
 
@@ -1188,6 +1438,48 @@ function getWidgetsTotalHeight(node) {
     return totalHeight + 20;
 }
 
+// Returns the actual Y coordinate where the widget area ends, based on
+// LiteGraph's rendered widget positions. After a frame has been drawn,
+// each visible widget has `last_y` (its top Y in node-local coords) set
+// by LiteGraph. Using the rendered positions avoids the calibration drift
+// between our static height estimation and LiteGraph's actual layout
+// (multiline string widgets, in particular, do not always match their
+// `computeSize` return value once an HTML textarea is overlaid).
+//
+// Falls back to the static estimation on the very first draw, before
+// last_y has been populated.
+function getRenderedWidgetAreaBottom(node) {
+    if (!node.widgets || node.widgets.length === 0) {
+        return getWidgetsTotalHeight(node);
+    }
+
+    let lastRendered = null;
+    for (const widget of node.widgets) {
+        if (widget.hidden) continue;
+        if (typeof widget.last_y !== 'number') continue;
+        // Track the visually-lowest rendered widget (not just the last
+        // in array order — display reordering can change which is on top).
+        if (!lastRendered || widget.last_y > lastRendered.last_y) {
+            lastRendered = widget;
+        }
+    }
+
+    if (!lastRendered) {
+        return getWidgetsTotalHeight(node);
+    }
+
+    let h = 20; // LiteGraph default widget height
+    if (typeof LiteGraph !== 'undefined' && typeof LiteGraph.NODE_WIDGET_HEIGHT === 'number') {
+        h = LiteGraph.NODE_WIDGET_HEIGHT;
+    }
+    if (lastRendered.computeSize) {
+        const size = lastRendered.computeSize(node.size[0]);
+        if (size && typeof size[1] === 'number') h = size[1];
+    }
+
+    return lastRendered.last_y + h + 4; // small bottom gap before custom-drawn area
+}
+
 function wrapText(ctx, text, maxWidth) {
     if (!text.trim()) return [''];
     
@@ -1276,7 +1568,9 @@ function drawCheckboxList(node, ctx, text, app) {
     // Only adjust node size if content requires significantly more space
     // This prevents unwanted size changes when switching tabs while ensuring content is visible
     const baseTextHeight = Math.max(CONFIG.minNodeHeight, CONFIG.widgetSpacing + groupAreaHeight + totalWrappedLines * CONFIG.lineHeight + 20);
-    const widgetsHeight = getWidgetsTotalHeight(node);
+    // Use rendered widget positions for the checkbox area so we don't overlap
+    // buttons whose real height differs from our static estimate.
+    const widgetsHeight = getRenderedWidgetAreaBottom(node);
     const previewHeight = node.hidePreview ? 0 : (CONFIG.previewSeparator + CONFIG.previewHeight);
     const desiredTotalHeight = baseTextHeight + widgetsHeight + previewHeight;
     // Cap auto-grow so a huge phrase list doesn't produce a ridiculously tall node.
@@ -1329,7 +1623,7 @@ function drawCheckboxList(node, ctx, text, app) {
         // If text is empty
         ctx.fillStyle = getColors().inactiveTextColor;
         ctx.textAlign = "center";
-        const widgetHeight = getWidgetsTotalHeight(node);
+        const widgetHeight = getRenderedWidgetAreaBottom(node);
         const widgetAndPreviewHeight = node.hidePreview ? widgetHeight : (widgetHeight + CONFIG.previewHeight + CONFIG.previewSeparator);
         const textAreaHeight = node.size[1] - widgetAndPreviewHeight;
         ctx.fillText("No Text", node.size[0]/2, widgetHeight + CONFIG.widgetSpacing + textAreaHeight/2);
@@ -1342,7 +1636,7 @@ function drawCheckboxList(node, ctx, text, app) {
 function drawCheckboxItems(ctx, lines, node) {
     // Scroll metrics computed in drawCheckboxList
     const scroll = node._ppCheckboxScroll || {
-        areaTop: getWidgetsTotalHeight(node) + CONFIG.widgetSpacing,
+        areaTop: getRenderedWidgetAreaBottom(node) + CONFIG.widgetSpacing,
         areaBottom: node.size[1],
         areaHeight: node.size[1],
         maxScrollLines: 0,
@@ -1499,7 +1793,7 @@ function getPhraseText(line, isCommented) {
 function drawGroupControls(node, ctx, text, groups) {
     if (groups.length === 0) return 0;
 
-    const widgetsHeight = getWidgetsTotalHeight(node);
+    const widgetsHeight = getRenderedWidgetAreaBottom(node);
     const y = widgetsHeight + CONFIG.widgetSpacing;
     const buttonHeight = CONFIG.groupButtonHeight;
     const margin = CONFIG.groupButtonMargin;
@@ -1816,15 +2110,15 @@ function setWeight(text, weight) {
 function adjustWeight(text, delta) {
     const currentWeight = parseWeight(text);
     const newWeight = Math.round((currentWeight + delta) * 10) / 10;
-    
+
     const minWeight = CONFIG.minWeight;
     const maxWeight = CONFIG.maxWeight;
-    
+
     // Handle out-of-range values
     if (newWeight < minWeight) {
         return text; // Don't allow values below minimum
     }
-    
+
     if (newWeight > maxWeight) {
         // If trying to increase beyond maximum, don't change
         if (delta > 0) {
@@ -1833,13 +2127,63 @@ function adjustWeight(text, delta) {
         // If trying to decrease from above maximum, clamp to maximum
         return setWeight(text, maxWeight);
     }
-    
+
     // Special case: if current weight is above maximum and we're decreasing
     if (currentWeight > maxWeight && delta < 0) {
         return setWeight(text, maxWeight);
     }
-    
+
     return setWeight(text, newWeight);
+}
+
+// ----- Bulk weight operations (apply to every phrase line) -----
+//
+// Walks every line, skipping blanks and `#` description comments. For each
+// remaining line, extracts the leading `//` toggle prefix (if any) and the
+// trailing inline `// comment` (if any), then runs `transformFn` on the
+// raw phrase content (which still includes `[group]` tags and any existing
+// `(text:weight)` notation — `setWeight()` / `adjustWeight()` already
+// preserve those through backend processing).
+function transformAllPhrases(text, transformFn) {
+    const lines = text.split('\n');
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#')) continue;
+
+        let prefix = '';
+        let content = line;
+        const commentMatch = line.match(/^(\s*\/\/\s*)(.*)$/);
+        if (commentMatch) {
+            prefix = commentMatch[1];
+            content = commentMatch[2];
+        }
+
+        let inlineComment = '';
+        if (!commentMatch && content.includes('//')) {
+            const idx = content.indexOf('//');
+            inlineComment = ' ' + content.substring(idx);
+            content = content.substring(0, idx).trimEnd();
+        }
+
+        if (!content.trim()) continue;
+
+        const transformed = transformFn(content);
+        lines[i] = prefix + transformed + inlineComment;
+    }
+    return lines.join('\n');
+}
+
+function setAllWeights(text, newWeight) {
+    let w = parseFloat(newWeight);
+    if (isNaN(w)) return text;
+    w = Math.max(CONFIG.minWeight, Math.min(CONFIG.maxWeight, w));
+    w = Math.round(w * 10) / 10;
+    return transformAllPhrases(text, (content) => setWeight(content, w));
+}
+
+function adjustAllWeights(text, delta) {
+    return transformAllPhrases(text, (content) => adjustWeight(content, delta));
 }
 
 // ========================================
@@ -1953,6 +2297,19 @@ const DOM_CSS = `
     border-color: var(--border-color, #4e4e4e) !important;
     font-size: 12px;
     padding: 2px 10px;
+}
+.pp-weight-bulk-btn {
+    background: var(--comfy-input-bg, #222);
+    color: var(--input-text, #ddd);
+    border: 1px solid var(--border-color, #4e4e4e);
+    border-radius: 3px;
+    font-size: 12px;
+    padding: 2px 8px;
+    cursor: pointer;
+    min-width: 36px;
+}
+.pp-weight-bulk-btn:hover {
+    background: color-mix(in srgb, var(--input-text, #ddd) 12%, var(--comfy-input-bg, #222));
 }
 .pp-phrases {
     padding: 2px 0;
@@ -2155,8 +2512,10 @@ const DOM_CSS = `
 }
 .pp-separator-row {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 6px;
+    row-gap: 4px;
     padding: 4px 6px;
     font-size: 12px;
     border-top: 1px solid var(--border-color, #4e4e4e);
@@ -2310,11 +2669,15 @@ function createDOMWidget(node, textWidget, app) {
         const row = document.createElement('div');
         row.className = 'pp-separator-row';
 
+        const SEP_TOOLTIP = 'Separator used to join selected phrases (default: ", "). Use empty string for no separator.';
+
         // Separator input
         const sepLabel = document.createElement('label');
         sepLabel.textContent = 'Sep: ';
+        sepLabel.title = SEP_TOOLTIP;
         const sepInput = document.createElement('input');
         sepInput.type = 'text';
+        sepInput.title = SEP_TOOLTIP;
         sepInput.value = getWidgetValue('separator') !== undefined ? getWidgetValue('separator') : ', ';
         sepInput.addEventListener('input', () => {
             setWidgetValue('separator', sepInput.value);
@@ -2324,15 +2687,37 @@ function createDOMWidget(node, textWidget, app) {
         sepLabel.appendChild(sepInput);
         row.appendChild(sepLabel);
 
-        // Checkboxes for options
+        // Checkboxes for options (with hover tooltips)
         const options = [
-            { name: 'trailing_separator', label: 'Trail' },
-            { name: 'separator_newline', label: 'Sep NL' },
-            { name: 'add_newline', label: 'End NL' },
-            { name: 'prefix_separator', label: 'Prefix Sep' },
+            {
+                name: 'trailing_separator',
+                label: 'Trail',
+                tooltip: 'Append the separator after the last phrase too.',
+            },
+            {
+                name: 'separator_newline',
+                label: 'Sep NL',
+                tooltip: 'Append a newline after each separator (one phrase per line in output).',
+            },
+            {
+                name: 'add_newline',
+                label: 'End NL',
+                tooltip: 'Append a newline at the very end of the output.',
+            },
+            {
+                name: 'prefix_separator',
+                label: 'Prefix Sep',
+                tooltip: 'Insert the separator between prefix and body. OFF = plain prefix+body concat.',
+            },
+            {
+                name: 'empty_when_no_selection',
+                label: 'Empty if no sel',
+                tooltip: 'When no phrase is selected, output Python None on all three outputs (no prefix, no newline). Targets switches like rgthree Any Switch that check `value is None` to route to another input.',
+            },
         ];
         for (const opt of options) {
             const label = document.createElement('label');
+            if (opt.tooltip) label.title = opt.tooltip;
             const cb = document.createElement('input');
             cb.type = 'checkbox';
             cb.checked = !!getWidgetValue(opt.name);
@@ -2418,6 +2803,19 @@ function createDOMWidget(node, textWidget, app) {
             render();
         });
         toolbar.appendChild(editBtn);
+
+        // Set All Weights button (placed next to Edit per user request).
+        // Appended after Edit so it sits to the right of Edit (Edit has
+        // margin-left:auto which pushes the right-side group toward the edge).
+        const weightBtn = document.createElement('button');
+        weightBtn.className = 'pp-weight-bulk-btn';
+        weightBtn.textContent = 'W±';
+        weightBtn.title = 'Set or adjust the weight of every phrase at once';
+        weightBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            openBulkWeightEditor(node, e);
+        });
+        toolbar.appendChild(weightBtn);
 
         el.appendChild(toolbar);
 
@@ -2694,6 +3092,195 @@ function getPreviewOverride(node) {
     return override.trim() !== "" ? override : "";
 }
 
+// Floating panel anchored near the click for bulk-adjusting all phrase weights.
+// Two interactions: absolute set (number + Apply) and relative nudge (-0.1/+0.1
+// applied immediately). Clicking outside or pressing Esc closes the panel.
+function openBulkWeightEditor(node, anchorEvent) {
+    if (node._promptPalette_weightPanelOpen) return;
+    node._promptPalette_weightPanelOpen = true;
+
+    const textWidget = findTextWidget(node);
+    if (!textWidget) {
+        node._promptPalette_weightPanelOpen = false;
+        return;
+    }
+
+    const panel = document.createElement("div");
+    panel.style.cssText = `
+        position: fixed;
+        z-index: 10000;
+        background: var(--comfy-menu-bg, #202020);
+        color: var(--input-text, #ddd);
+        border: 1px solid var(--border-color, #4e4e4e);
+        border-radius: 6px;
+        padding: 8px 10px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+        font-family: sans-serif;
+        font-size: 12px;
+        user-select: none;
+        min-width: 220px;
+    `;
+
+    // Position near the anchor event, with viewport clamping done after mount.
+    const anchorX = (anchorEvent && anchorEvent.clientX) || 100;
+    const anchorY = (anchorEvent && anchorEvent.clientY) || 100;
+    panel.style.left = `${anchorX}px`;
+    panel.style.top = `${anchorY + 8}px`;
+
+    const header = document.createElement("div");
+    header.style.cssText = `
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-weight: bold;
+        margin-bottom: 8px;
+        color: var(--input-text, #ddd);
+    `;
+    const title = document.createElement("span");
+    title.textContent = "Set Weights for All Phrases";
+    const closeBtn = document.createElement("span");
+    closeBtn.textContent = "✕";
+    closeBtn.style.cssText = `cursor: pointer; padding: 0 4px;`;
+    header.appendChild(title);
+    header.appendChild(closeBtn);
+    panel.appendChild(header);
+
+    // Absolute set row
+    const setRow = document.createElement("div");
+    setRow.style.cssText = `display: flex; align-items: center; gap: 6px; margin-bottom: 6px;`;
+    const setLabel = document.createElement("span");
+    setLabel.textContent = "Set all to:";
+    setLabel.style.cssText = `min-width: 70px;`;
+    const numberInput = document.createElement("input");
+    numberInput.type = "number";
+    numberInput.min = String(CONFIG.minWeight);
+    numberInput.max = String(CONFIG.maxWeight);
+    numberInput.step = "0.1";
+    numberInput.value = "1.0";
+    numberInput.style.cssText = `
+        width: 60px;
+        background: var(--comfy-input-bg, #222);
+        color: var(--input-text, #ddd);
+        border: 1px solid var(--border-color, #4e4e4e);
+        border-radius: 3px;
+        padding: 2px 4px;
+        font-size: 12px;
+    `;
+    const applyBtn = document.createElement("button");
+    applyBtn.textContent = "Apply";
+    applyBtn.style.cssText = `
+        background: var(--comfy-input-bg, #222);
+        color: var(--input-text, #ddd);
+        border: 1px solid var(--border-color, #4e4e4e);
+        border-radius: 3px;
+        padding: 2px 10px;
+        font-size: 12px;
+        cursor: pointer;
+    `;
+    setRow.appendChild(setLabel);
+    setRow.appendChild(numberInput);
+    setRow.appendChild(applyBtn);
+    panel.appendChild(setRow);
+
+    // Relative adjust row
+    const adjRow = document.createElement("div");
+    adjRow.style.cssText = `display: flex; align-items: center; gap: 6px;`;
+    const adjLabel = document.createElement("span");
+    adjLabel.textContent = "Adjust:";
+    adjLabel.style.cssText = `min-width: 70px;`;
+    const minusBtn = document.createElement("button");
+    minusBtn.textContent = "− 0.1";
+    const plusBtn = document.createElement("button");
+    plusBtn.textContent = "+ 0.1";
+    const adjBtnStyle = `
+        background: var(--comfy-input-bg, #222);
+        color: var(--input-text, #ddd);
+        border: 1px solid var(--border-color, #4e4e4e);
+        border-radius: 3px;
+        padding: 2px 10px;
+        font-size: 12px;
+        cursor: pointer;
+        min-width: 56px;
+    `;
+    minusBtn.style.cssText = adjBtnStyle;
+    plusBtn.style.cssText = adjBtnStyle;
+    adjRow.appendChild(adjLabel);
+    adjRow.appendChild(minusBtn);
+    adjRow.appendChild(plusBtn);
+    panel.appendChild(adjRow);
+
+    document.body.appendChild(panel);
+
+    // Clamp to viewport
+    const rect = panel.getBoundingClientRect();
+    if (rect.right > window.innerWidth - 8) {
+        panel.style.left = `${Math.max(8, window.innerWidth - rect.width - 8)}px`;
+    }
+    if (rect.bottom > window.innerHeight - 8) {
+        panel.style.top = `${Math.max(8, window.innerHeight - rect.height - 8)}px`;
+    }
+
+    // After applying, trigger UI refresh: Nodes 2.0 DOM widget re-renders via
+    // node._ppDomRender if available; Classic mode redraws via setDirtyCanvas.
+    function refreshUI() {
+        setPreviewOverride(node, "");
+        if (typeof node._ppDomRender === 'function') {
+            try { node._ppDomRender(); } catch (e) { /* ignore */ }
+        }
+        app.graph.setDirtyCanvas(true);
+    }
+
+    function applyAbsolute() {
+        const v = parseFloat(numberInput.value);
+        if (isNaN(v)) return;
+        textWidget.value = setAllWeights(textWidget.value, v);
+        refreshUI();
+    }
+
+    function applyDelta(delta) {
+        textWidget.value = adjustAllWeights(textWidget.value, delta);
+        refreshUI();
+        // Also bump the displayed number to give visual feedback
+        const cur = parseFloat(numberInput.value);
+        if (!isNaN(cur)) {
+            const next = Math.max(CONFIG.minWeight, Math.min(CONFIG.maxWeight, Math.round((cur + delta) * 10) / 10));
+            numberInput.value = next.toFixed(1);
+        }
+    }
+
+    applyBtn.addEventListener("click", (e) => { e.stopPropagation(); applyAbsolute(); });
+    numberInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); applyAbsolute(); }
+    });
+    minusBtn.addEventListener("click", (e) => { e.stopPropagation(); applyDelta(-0.1); });
+    plusBtn.addEventListener("click", (e) => { e.stopPropagation(); applyDelta(0.1); });
+
+    let closed = false;
+    function closePanel() {
+        if (closed) return;
+        closed = true;
+        document.removeEventListener("mousedown", outsideHandler, true);
+        document.removeEventListener("keydown", keyHandler, true);
+        if (panel.parentNode) panel.parentNode.removeChild(panel);
+        node._promptPalette_weightPanelOpen = false;
+    }
+    function outsideHandler(e) {
+        if (!panel.contains(e.target)) closePanel();
+    }
+    function keyHandler(e) {
+        if (e.key === "Escape") { e.preventDefault(); closePanel(); }
+    }
+    closeBtn.addEventListener("click", (e) => { e.stopPropagation(); closePanel(); });
+
+    // Defer outside-click registration so the originating click doesn't immediately close us
+    setTimeout(() => {
+        document.addEventListener("mousedown", outsideHandler, true);
+        document.addEventListener("keydown", keyHandler, true);
+        numberInput.focus();
+        numberInput.select();
+    }, 10);
+}
+
 function openPreviewEditor(node) {
     // Prevent multiple editors
     if (node._promptPalette_editorOpen) return;
@@ -2712,12 +3299,13 @@ function openPreviewEditor(node) {
     const previewY = nodeHeight - CONFIG.previewHeight - 10;
     const previewWidth = nodeWidth - CONFIG.sideNodePadding * 2;
 
-    // Transform node-local coordinates to canvas coordinates, then to screen coordinates
+    // Transform node-local coordinates to canvas coordinates, then to screen coordinates.
+    // LiteGraph DragAndScale convention: canvasX = (graphX + offset[0]) * scale
     const transform = canvas.ds;
     const canvasRect = canvasEl.getBoundingClientRect();
 
-    const screenX = canvasRect.left + (nodePos[0] + previewX) * transform.scale + transform.offset[0];
-    const screenY = canvasRect.top + (nodePos[1] + previewY + 22) * transform.scale + transform.offset[1];
+    const screenX = canvasRect.left + (nodePos[0] + previewX + transform.offset[0]) * transform.scale;
+    const screenY = canvasRect.top + (nodePos[1] + previewY + 22 + transform.offset[1]) * transform.scale;
     const screenWidth = previewWidth * transform.scale;
     const screenHeight = (CONFIG.previewHeight - 25) * transform.scale;
 

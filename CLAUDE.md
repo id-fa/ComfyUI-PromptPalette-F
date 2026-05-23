@@ -56,9 +56,11 @@ The project follows ComfyUI's custom node structure with V3 API compliance and d
    - **V1 INPUT_TYPES**: Always defined for backward compatibility
      - String-based types: `"STRING"`, `"BOOLEAN"`
      - `prefix` is a multiline STRING widget (NOT `forceInput` — was changed from slot in May 2026)
-   - **Input order (required → optional)**: `text` → `separator` → `trailing_separator` → `separator_newline` → `add_newline` → `preview_override` → `prefix` → `prefix_separator`. New optional inputs are always appended at the end to preserve `widgets_values` index stability for older saves
+   - **Input order (required → optional)**: `text` → `separator` → `trailing_separator` → `separator_newline` → `add_newline` → `preview_override` → `prefix` → `prefix_separator` → `empty_when_no_selection`. New optional inputs are always appended at the end to preserve `widgets_values` index stability for older saves
+   - **Outputs (3)**: `text` (STRING) — main joined output with prefix/separator/override applied; `selected_text` (STRING) — selected phrases joined by `\n`, weight notation stripped, no prefix/separator; `selected_list` (LIST) — Python list of the same selected phrases. `RETURN_TYPES = ("STRING", "STRING", "LIST")`, `RETURN_NAMES = ("text", "selected_text", "selected_list")`
    - **Execution**: `execute()` classmethod processes text
-   - **Preview override**: `preview_override` parameter enables temporary prompt editing from frontend; when non-empty, bypasses all text processing and returns override text directly
+   - **Preview override**: `preview_override` parameter enables temporary prompt editing from frontend; when non-empty, the `text` output bypasses processing and returns override text directly. `selected_text` / `selected_list` always reflect the real selection regardless of override
+   - **Empty when no selection**: `empty_when_no_selection` (BOOLEAN, default `False`) — when ON and no phrase survives `//`-filtering, returns `(None, None, None)` on every output. Switch/router nodes that check `value is None` (e.g. rgthree's Any Switch) treat this as "skip this input" and pass through the next non-None input instead. Downstream execution itself still proceeds (NOT `ExecutionBlocker`), so users can decide per-pipeline how to handle the None. `preview_override` always wins over this toggle
    - Processes multiline text input by filtering commented lines (lines starting with `//` or `#`)
    - Handles inline comments by splitting on `//` and keeping only the content before
    - Uses custom separator (default: `, `) to join non-commented lines
@@ -67,10 +69,11 @@ The project follows ComfyUI's custom node structure with V3 API compliance and d
    - Supports adding newline at end of output (`add_newline` parameter)
    - Supports adding newline after separator (`separator_newline` parameter)
    - Supports trailing separator (`trailing_separator` parameter)
-   - **Group tag filtering**: Removes group tags `[group]` from output using `remove_group_tags_with_escape()` staticmethod (lines 91-104)
+   - **Group tag filtering**: Removes group tags `[group]` from output using `remove_group_tags_with_escape()` staticmethod
+   - **Weight stripping** (for list outputs only): `strip_weight_notation()` staticmethod repeatedly unwraps `(text:1.5)` → `text` so the list outputs contain clean phrases. Plain `(text)` without numeric weight is left intact
    - **Escape character support**: Preserves literal brackets using `\[` and `\]` escape sequences
-   - **Conditional return format**: Returns `io.NodeOutput()` if V3 available, tuple otherwise (lines 163-167)
-   - **V3 Extension** (lines 170-181): Only defined if V3 API available, exported via `comfy_entrypoint()` async function
+   - **Conditional return format**: Returns `io.NodeOutput(text, selected_text, selected_list)` if V3 available, tuple otherwise
+   - **V3 Extension**: Only defined if V3 API available, exported via `comfy_entrypoint()` async function
 
 2. **Web Extension - Adaptive Dual Mode** (`web/index.js`):
    - **Single Unified Registration**: Single extension "PromptPalette_F" that adapts to rendering mode
@@ -198,12 +201,39 @@ The project follows ComfyUI's custom node structure with V3 API compliance and d
    - **Auto-clear**: Override automatically clears when source text changes (checkbox toggle, group toggle, direct text edit)
    - **Clickable area integration**: `preview_edit` and `preview_reset` actions in `handleClickableAreaAction()`
 
-13. **Dynamic Widget Height System** (`web/index.js:449-468`):
-   - **Automatic height calculation**: `getWidgetsTotalHeight()` dynamically calculates widget area height
-   - **Hidden widget handling**: Skips hidden widgets (text, separator, etc.) when calculating height
-   - **ComfyUI version compatibility**: Adapts to different ComfyUI versions automatically
+13. **Dynamic Widget Height System** (`web/index.js`):
+   - **Static estimation**: `getWidgetsTotalHeight()` sums visible widgets' `computeSize()` values plus per-widget margin and bottom padding. Used by `nodeType.prototype.computeSize()` (which is called BEFORE first draw, so `last_y` is unavailable)
+   - **Rendered-position lookup**: `getRenderedWidgetAreaBottom()` reads `widget.last_y` (set by LiteGraph during widget rendering) for the visually-lowest visible widget and adds its `computeSize`-reported height. Used by drawing functions (`drawCheckboxList`, `drawCheckboxItems`, `drawGroupControls`, "No Text" fallback) — avoids the calibration drift between our static estimate and LiteGraph's actual layout (multiline string widgets in particular don't always match `computeSize` once an HTML textarea is overlaid). Falls back to `getWidgetsTotalHeight()` when `last_y` isn't set yet
+   - **Hidden widget handling**: Skips hidden widgets when calculating height
    - **Flexible spacing**: Uses `CONFIG.widgetSpacing` (5px) for minimal gap between widgets and content
-   - **Layout optimization**: Ensures buttons are visible and content is properly positioned regardless of ComfyUI version
+
+14. **Selected Words Output System** (`nodes.py`):
+   - Two additional output ports beside the main joined `text` output:
+     - `selected_text` (STRING): selected phrases joined by `\n`
+     - `selected_list` (LIST): Python list of the same selected phrases
+   - Both list outputs apply group-tag removal AND weight-notation stripping (`(phrase:1.5)` → `phrase`) so downstream nodes receive clean phrase strings
+   - Both list outputs IGNORE `prefix`, `separator`, `trailing_separator`, `add_newline`, `separator_newline`, `preview_override` — they always reflect the raw selection state
+   - When `preview_override` is set, the main `text` output uses the override but list outputs continue to reflect actual selection
+   - When `false_when_empty` triggers, all three outputs become Python `False`
+
+15. **Bulk Weight Editor** (`web/index.js`):
+   - Floating HTML overlay panel for setting/adjusting the weight of EVERY phrase at once
+   - Triggered by:
+     - Classic mode: "Set All Weights" button widget placed above the Edit button
+     - Nodes 2.0 mode: compact "W±" button in the display-mode toolbar next to Edit
+   - Panel UI: absolute `<input type="number">` + Apply button for "set all to X", plus `−0.1` / `+0.1` buttons for immediate relative adjust. Esc / click-outside / ✕ closes
+   - **Affects ALL phrases** including `//`-commented ones — users can pre-set weights before activating phrases. `#` description comments and empty lines are skipped
+   - **Helper functions**: `transformAllPhrases(text, transformFn)` walks lines, preserves `//` prefix and inline `// comment`, applies `transformFn` to phrase content (which still includes `[group]` tags). `setAllWeights(text, w)` clamps and delegates to per-line `setWeight()`. `adjustAllWeights(text, delta)` delegates to per-line `adjustWeight()`. `openBulkWeightEditor(node, anchorEvent)` is the panel
+   - After each apply: clears `preview_override`, calls `node._ppDomRender()` if present (Nodes 2.0), and triggers `setDirtyCanvas` (Classic)
+
+16. **Empty When No Selection Toggle** (`nodes.py`, `web/index.js`):
+   - `empty_when_no_selection` BOOLEAN input (default `False`) — when ON and `filtered_lines` is empty, returns `(None, None, None)` on every output (literal Python None)
+   - Intended use: feeds into switch/router nodes that check `value is None` to skip the input. Concrete target is **rgthree's Any Switch** (`is_none()` does `return value is None` — empty strings are NOT treated as None by that switch, so we must emit literal None to trigger its skip path)
+   - Downstream execution still runs (NOT `ExecutionBlocker`) — switches/conditionals decide what to do per-pipeline
+   - **Caveat**: downstream nodes that don't gracefully handle `None` will error. Users should either keep the toggle OFF for such pipelines, or insert a switch/None-handler in between
+   - `preview_override` takes priority: if override is set, the None-output path is bypassed (override always wins)
+   - UI: checkbox labeled "Empty if no sel" in the Edit-mode options row (both modes)
+   - Backward compat: `sanitizeLegacyPrefixValues()` extended to reset non-boolean `empty_when_no_selection` values (also catches saves from the brief `false_when_empty`-named iteration of this same toggle)
 
 ## Development Commands
 
@@ -320,22 +350,29 @@ This project requires no build process or package management - it's a pure Comfy
 - **Canvas interaction**: Mouse clicks are mapped to clickable areas (checkboxes, text areas, weight buttons, group buttons, global toggle buttons)
 - **Row selection**: Entire phrase text area is clickable for toggling (excluding weight controls on right edge)
 - **Preview override**: Temporary edit stored on `node._promptPalette_previewOverride`, injected into prompt via `api.queuePrompt` patch, auto-cleared on source text change
-- **HTML overlay pattern**: `openPreviewEditor()` creates `position: fixed` container with toolbar + textarea, uses canvas coordinate transform for positioning, manages focus with `setTimeout` delays to avoid LiteGraph interference
+- **HTML overlay pattern**: `openPreviewEditor()` and `openBulkWeightEditor()` create `position: fixed` containers, anchor via canvas coordinate transform, manage focus with `setTimeout` delays to avoid LiteGraph interference
+- **Canvas → screen coordinate transform**: LiteGraph's DragAndScale convention is `canvasX = (graphX + offset[0]) * scale` (NOT `graphX * scale + offset[0]`). The wrong formula coincides at scale=1 but mispositions overlays by `offset[0] * (scale - 1)` at non-1 zoom — overlays can fly off-screen at extreme zoom and the user thinks the button "did nothing". Always use `rect.left + (graphX + offset[0]) * scale` when positioning a fixed-position DOM overlay relative to a graph point. For button-anchored panels, prefer reading `button.last_y` for the local Y rather than hardcoding an offset
+- **Hover tooltip pattern (Classic mode)**: LiteGraph canvas-drawn widgets don't expose a native tooltip system, so we paint our own via a single fixed-position DOM overlay (`pointer-events: none`). A document-level `mousemove` listener bails if `e.target !== canvas.canvas` (so HTML overlays / Nodes 2.0 DOM widget aren't affected), uses `getNodeOnPos` to find the node and `widget.last_y` + `computeSize` to find the hovered widget. 500ms show delay, and same-widget mousemoves do NOT reset the timer (otherwise the timer never fires while the cursor drifts inside the widget). Nodes 2.0 mode uses HTML `title` attribute instead — same text, native browser tooltip
 - **Reload Node recovery**: Initial workflow state snapshotted on first `configure()` into `app.graph._ppInitialStates[nodeId]`. Because ComfyUI's Reload Node assigns a **new id** to the recreated instance, a `onRemoved` → `onAdded` bridge (`app.graph._ppPendingReload`) transfers the saved state and re-keys it under the new id. Graph-level state cleared via patched `LGraph.prototype.clear` on workflow switch.
 - **Prefix as widget (not slot)**: `prefix` is a multiline STRING widget kept at `widgets[0]` via `reorderPrefixToTop()`. **Critical**: `prefix` must remain in `node.widgets[]` in both Classic and Nodes 2.0 modes — removing it from `widgets[]` (as we do for other widgets in Nodes 2.0) breaks ComfyUI's automatic widget↔input-slot conversion and makes the prefix slot unwireable. The DOM Widget UI in Nodes 2.0 does NOT render its own prefix textarea; the native widget at the top serves as both editor and connectable slot. `prefix_separator` toggles whether `separator` is inserted between prefix and body
-- **`PP_INPUT_ORDER` invariant**: `serialize()` always lays out `node.widgets[]` into `PP_INPUT_ORDER` before delegating to `origSerialize`, then restores. `restoreInitialState()` maps `widgets_values[i]` to `findWidgetByName(node, PP_INPUT_ORDER[i])`. Together, these decouple display order (which can be freely reshuffled) from save/restore order
-- **Legacy widgets_values sanitization**: `sanitizeLegacyPrefixValues()` resets `"edit_text"`/`"toggle_preview"` button labels that pre-prefix-widget saves dropped into the new prefix indices
+- **`PP_INPUT_ORDER` invariant**: `serialize()` always lays out `node.widgets[]` into `PP_INPUT_ORDER` before delegating to `origSerialize`, then restores. `configure()` ALSO re-applies `widgets_values` via name-based lookup (`findWidgetByName(node, PP_INPUT_ORDER[i])`) AFTER `origConfigure`, defending against third-party extensions (e.g. `PromptPalette_F_Vue`) that inject extra widgets and shift our widgets' array indices. `restoreInitialState()` uses the same name-based pattern for Reload Node recovery. Together, these decouple display order from save/restore order entirely
+- **Legacy widgets_values sanitization**: `sanitizeLegacyPrefixValues()` resets stray button labels (`"edit_text"`, `"toggle_preview"`, `"set_all_weights"`) that pre-feature saves dropped into the new prefix indices, and resets non-boolean `prefix_separator` / `empty_when_no_selection` values for the same reason
 - **Phrase list scrolling (Classic mode)**: Auto-grow capped at `CONFIG.maxAutoNodeHeight` (600px). When content exceeds the visible phrase area, `node.checkboxScrollOffset` (line units) scrolls. `drawCheckboxItems` uses `ctx.clip` for visual clipping and only registers clickable areas at *displayed* Y. Wheel scrolling via a document-level capture-phase listener installed in `setup()` (intercepts before ComfyUI's canvas zoom). `cb_scroll_up` / `cb_scroll_down` actions for the ▲▼ buttons
 - **Width-shrink invariant**: `nodeType.prototype.computeSize` MUST NOT return the current node width — LiteGraph reads it as the drag-resize minimum. Width preservation on configure/redraw is done by passing `[this.size[0], computed[1]]` to `setSize` explicitly. Widget-level `computeSize` (e.g., prefix) must return `[0, h]` for the same reason
+- **Widget area Y: static vs rendered**: Use `getWidgetsTotalHeight()` (static estimate from `computeSize`) BEFORE first draw — `nodeType.prototype.computeSize` is the only consumer. AFTER first draw, prefer `getRenderedWidgetAreaBottom()` (reads LiteGraph's `widget.last_y`) for any "where does the widget block actually end" lookup. The multiline `prefix` widget's HTML textarea overlay can extend past its declared `computeSize`, so static estimates drift and cause our custom-drawn checkbox area to overlap the buttons
+- **Bulk weight transform pattern**: `transformAllPhrases(text, transformFn)` is the canonical way to apply a per-phrase transformation across the whole text while preserving `//` toggle prefix, inline `// comment`, and `[group]` tags. Backend processing strips `[group]` from inside `(text [group]:1.5)` correctly, so the transform can ignore tags
+- **Selected-words outputs**: `selected_text` and `selected_list` always reflect the actual selection (`//`-filtered, group-stripped, weight-stripped). They are independent of `prefix`, `separator`, `trailing_separator`, `add_newline`, `separator_newline`, and `preview_override`. Use them when downstream needs a clean phrase list
+- **`empty_when_no_selection` short-circuit**: When the toggle is ON and `filtered_lines` is empty, returns `(None, None, None)` on every output. Specifically chosen so rgthree's Any Switch (which does `value is None`) treats the input as skipped and passes through the next non-None input. Downstream execution still runs (NOT `ExecutionBlocker`). `preview_override` always wins over this toggle
 - **State management**: Node tracks edit mode, clickable areas, widget visibility, text wrapping, preview override, and `checkboxScrollOffset`
 - **Canvas redrawing**: Triggered via `app.graph.setDirtyCanvas(true)` after state changes
 
 ## Code Organization
 
-### web/index.js Structure (approx. 2,600+ lines):
+### web/index.js Structure (approx. 3,200+ lines):
 - **Imports**: `app` from ComfyUI app.js, `api` from ComfyUI api.js
 - **Configuration**: CONFIG object with UI constants, including widgetSpacing
 - **Group Parsing Functions**: Group tag extraction, status tracking, simplified toggle logic, global toggles
+- **Classic-mode tooltip system**: `WIDGET_TOOLTIPS` map, `_ppGetTooltipEl()` lazy DOM overlay, `_ppShowTooltipAt()` / `_ppHideTooltip()` helpers, `installClassicTooltipListener(app)` (installed once from `setup()` via `window.__ppPromptPaletteTooltipHooked` guard). Bails on non-canvas mouse targets so Nodes 2.0 DOM widget and HTML overlays aren't affected
 - **Unified Extension Registration**: Single "PromptPalette_F" extension with adaptive mode detection
   - `setup()`: Patches `api.queuePrompt` to inject widget values (Nodes 2.0) and preview override (both modes)
   - `setupAdaptiveMode()`: Main setup function
@@ -346,12 +383,17 @@ This project requires no build process or package management - it's a pure Comfy
   - `onRemoved`: Captures the node's saved initial state into `app.graph._ppPendingReload` so the next new instance (Reload Node assigns a new id) can inherit it
   - `configure()`: Snapshots first-time `info` into `app.graph._ppInitialStates[nodeId]` (only on workflow load, not on subsequent edits) for later Reload Node recovery
 - **UI Control Functions**: Widget management, click handling, interaction (Classic mode only)
-  - `addEditButton()`: Creates Edit and Hide Preview buttons (called in Classic mode only)
+  - `addEditButton()`: Creates "Set All Weights" → Edit → Hide Preview buttons (in that order, so Set All Weights renders above Edit). Called in Classic mode only
   - `findWidgetByName()`: Unified widget lookup with `_ppWidgetRefs` fallback for Nodes 2.0
+  - `findFalseWhenEmptyWidget()`: helper for the `false_when_empty` toggle
   - Button creation, text widget handling, separator controls
 - **Text Wrapping Utilities**: Dynamic widget height calculation, text wrapping, width calculation
+  - `getWidgetsTotalHeight()`: static estimate, used by `nodeType.prototype.computeSize` (pre-draw)
+  - `getRenderedWidgetAreaBottom()`: queries `widget.last_y` (post-draw) for accurate widget-area bottom, used by draw functions
 - **Drawing Functions**: Canvas rendering for checkboxes, phrases, group controls, weight buttons, clickable text areas (Classic mode only)
 - **Weight System**: Parsing, adjustment, formatting for `(text:weight)` notation
+  - Per-line: `parseWeight()`, `setWeight()`, `adjustWeight()`, `adjustWeightInText()`
+  - Bulk: `transformAllPhrases()`, `setAllWeights()`, `adjustAllWeights()`, `openBulkWeightEditor()` (floating HTML panel)
 - **Theme/Color System**: Dynamic theme integration, color caching
 - **Nodes 2.0 DOM Widget UI**: Full HTML/CSS-based interactive UI for Nodes 2.0 mode
   - `DOM_CSS`: Complete CSS styles using ComfyUI theme variables
@@ -362,17 +404,24 @@ This project requires no build process or package management - it's a pure Comfy
 - **Preview System**: Preview generation, rendering, scrolling, edit/reset buttons (Classic mode only)
 - **Entry Point**: Extension registration
 
-### nodes.py Structure (188 lines):
-- **V3 API Conditional Imports**: Lines 4-12 (try/except block for comfy_api.latest imports, V3_AVAILABLE flag, dummy ComfyNode class)
-- **Base Class Selection**: Lines 14-18 (conditionally inherit from io.ComfyNode or object)
-- **Class Definition**: Lines 21-167 (PromptPalette_F class with conditional V3/V1 support)
-  - Lines 23-64: Conditional V3 `define_schema()` classmethod (includes `preview_override` optional input)
-  - Lines 67-84: V1 `INPUT_TYPES()` classmethod (includes `preview_override` in optional)
-  - Lines 86-88: V1-style class attributes (RETURN_TYPES, FUNCTION, CATEGORY)
-  - Lines 91-104: `remove_group_tags_with_escape()` staticmethod
-  - Lines 106-167: `execute()` classmethod with `preview_override` early return and conditional return format
-- **V3 Extension**: Lines 170-181 (PromptPaletteExtension and comfy_entrypoint, only if V3_AVAILABLE)
-- **V1 Legacy Exports**: Lines 184-188 (NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS, WEB_DIRECTORY - always defined)
+### nodes.py Structure (~235 lines):
+- **V3 API Conditional Imports**: try/except block for `comfy_api.latest` imports, `V3_AVAILABLE` flag, dummy `ComfyNode` class
+- **Base Class Selection**: Conditionally inherit from `io.ComfyNode` or `object`
+- **Class Definition**: `PromptPalette_F` class with conditional V3/V1 support
+  - Conditional V3 `define_schema()` classmethod with all inputs (text, separator, trailing_separator, separator_newline, add_newline, preview_override, prefix, prefix_separator, false_when_empty) and 3 outputs (text, selected_text, selected_list)
+  - V1 `INPUT_TYPES()` classmethod with the same inputs in the same order
+  - V1-style class attributes: `RETURN_TYPES = ("STRING", "STRING", "LIST")`, `RETURN_NAMES = ("text", "selected_text", "selected_list")`, `FUNCTION`, `CATEGORY`
+  - `remove_group_tags_with_escape()` staticmethod
+  - `strip_weight_notation()` staticmethod — repeatedly unwraps `(text:1.5)` → `text` for the list outputs
+  - `execute()` classmethod:
+    - Builds `filtered_lines` (with `//`-filter and `[group]`-strip)
+    - Builds `selected_list` (weights stripped, empties removed) and `selected_text = "\n".join(selected_list)` — these reflect actual selection regardless of override
+    - `preview_override` early return: `text` = override, list outputs still reflect real selection
+    - `false_when_empty` short-circuit: returns `(False, False, False)` when toggle is ON and `filtered_lines` is empty (prefix NOT prepended)
+    - Normal path: applies `separator`, `prefix`, `prefix_separator`, `trailing_separator`, `add_newline`
+    - Conditional return format: `io.NodeOutput(...)` if V3 available, tuple otherwise
+- **V3 Extension**: `PromptPaletteExtension` and `comfy_entrypoint`, only if `V3_AVAILABLE`
+- **V1 Legacy Exports**: `NODE_CLASS_MAPPINGS`, `NODE_DISPLAY_NAME_MAPPINGS`, `WEB_DIRECTORY` (always defined)
 
 ### __init__.py Structure (5 lines):
 - **V1-only Entry Point**: Imports and exports V1 mappings directly from nodes.py
@@ -396,6 +445,69 @@ This project includes `pyproject.toml` for ComfyUI registry publication followin
 - **Repository**: https://github.com/id-fa/ComfyUI-PromptPalette-F
 
 ## Development Status
+
+### Recent Changes (May 23, 2026)
+- ✅ **Widget hover tooltips (both modes)**: Added per-widget help text shown on mouse hover
+  - V1 `INPUT_TYPES` extended with `tooltip` option on every settable input (`separator`, `trailing_separator`, `separator_newline`, `add_newline`, `prefix`, `prefix_separator`, `empty_when_no_selection`). Newer ComfyUI builds wire these into their tooltip display automatically (Nodes 2.0 picks them up natively; Classic does NOT — see below)
+  - **Classic mode** (`web/index.js`): LiteGraph canvas-rendered widgets don't expose a native tooltip surface, so a top-level helper paints its own:
+    - `WIDGET_TOOLTIPS` constant maps widget name → tooltip text
+    - `_ppGetTooltipEl()` lazy-creates a single fixed-position DOM overlay (`z-index: 10001`, `pointer-events: none`)
+    - `installClassicTooltipListener(app)` (called once from `setup()`) installs a `document`-level `mousemove` listener. Bails immediately if `e.target !== app.canvas.canvas` so it never interferes with the DOM widget (Nodes 2.0) or HTML overlays. Uses LiteGraph's `convertCanvasToOffset` transform to find the hovered node, then `widget.last_y` + `computeSize()[1]` to find which visible widget is under the cursor. Same-widget mousemoves do NOT reset the show-delay timer (otherwise the user can never sit still long enough to see it)
+    - 500ms hover delay before showing; viewport-clamped to never spill off-screen
+  - **Nodes 2.0 mode**: `renderOptionsRow()` sets `label.title` and `input.title` so browsers render native tooltips on hover. Same text as the Classic system
+- ✅ **Options row wraps when narrow (Nodes 2.0)**: `.pp-separator-row` CSS extended with `flex-wrap: wrap` and `row-gap: 4px` so the `Sep / Trail / Sep NL / End NL / Prefix Sep / Empty if no sel` checkbox row reflows to two (or more) rows when the node is too narrow to fit them on one line, instead of overflowing the node bounds. `white-space: nowrap` on each label preserves "label+checkbox stays as one unit"
+- ✅ **Coordinate transform fix (LiteGraph canvas → screen)**: Both `openBulkWeightEditor` (Set All Weights panel anchor) and `openPreviewEditor` (preview-edit textarea overlay) used the formula `rect + graphX * scale + offset[0]`, which silently mispositions overlays at non-1 zoom by `offset[0] * (scale - 1)` pixels. At extreme zoom levels the panel could appear far off-screen and the user would think the button "did nothing"
+  - Fixed to LiteGraph's actual DragAndScale convention: `clientX = rect.left + (graphX + offset[0]) * scale` (and same for Y)
+  - Bonus improvement for the bulk-weight button: anchor now uses `weightButton.last_y` (LiteGraph's draw-time Y) so the panel appears immediately below the button regardless of node position, instead of using a hardcoded `localY = 40` offset from the node origin
+- ✅ **README.md: documented `prefix_separator` and `empty_when_no_selection`**: Added Settings section to both Japanese and English. Includes Nodes 2.0 short-label names in parentheses (`Sep`, `Trail`, `Sep NL`, `End NL`, `Prefix Sep`, `Empty if no sel`) so users can match the UI labels to the underlying input names
+- ✅ **`configure()` re-applies `widgets_values` by name**: A user reported that `empty_when_no_selection` (and likely other appended-late inputs) didn't persist across browser F5 / server restart. Diagnostic logs showed serialize wrote `widgets_values[8] = true` correctly, but on reload `origConfigure` assigned the wrong value to `empty_when_no_selection`'s widget object
+  - Root cause: a separate `PromptPalette_F_Vue` extension running in the same install injects an extra widget into `node.widgets` (mirrors the text content; appears at index 9 in widgets_values). On reload, this extra widget can land at a different array position than at save time, shifting our named inputs' indices and breaking `origConfigure`'s index-based `widgets[i].value = widgets_values[i]` mapping
+  - Fix: `configure()` now runs a second pass AFTER `origConfigure` that walks `PP_INPUT_ORDER` and assigns each value to the widget matched BY NAME via `findWidgetByName`. Third-party widgets (those not in `PP_INPUT_ORDER`) keep whatever value `origConfigure` gave them — those extensions are responsible for their own state
+  - `serialize()` was already canonical (writes in `PP_INPUT_ORDER`), so no change needed there. `restoreInitialState()` was already name-based for Reload Node recovery
+  - Symptom that surfaced this: `empty_when_no_selection` reset to `false` after F5, even though serialize captured `true`. The new toggle was visible because it's at the end of `PP_INPUT_ORDER`; older inputs likely had the same silent bug but their misaligned values happened to be of the right type so `sanitizeLegacyPrefixValues` didn't catch them
+
+### Recent Changes (May 22, 2026)
+- ✅ **Selected-words output ports added**: `RETURN_TYPES` changed from `("STRING",)` to `("STRING", "STRING", "LIST")` with `RETURN_NAMES = ("text", "selected_text", "selected_list")`
+  - Backend (`nodes.py`):
+    - New `strip_weight_notation()` staticmethod: repeatedly unwraps outermost `(text:1.5)` → `text` (handles nested `((a:1.2):1.5)`). Regex `\(\s*(.+?)\s*:\s*-?\d*\.?\d+\s*\)` accepts negative / integer / decimal weights. Plain `(text)` without a numeric weight is left intact
+    - `selected_list` is built from `filtered_lines` (after `//`-filter and `[group]`-strip) with weight notation removed, then empty entries filtered out
+    - `selected_text = "\n".join(selected_list)`
+    - **`preview_override` semantics**: override applies to `text` output only; `selected_text` / `selected_list` continue to reflect the actual selection so downstream nodes that consume the list aren't fooled by a one-off edit
+    - V3 schema outputs extended with `display_name` for each port
+- ✅ **Bulk weight editor**: One-click "set or adjust the weight of every phrase at once" panel
+  - Shared logic in `web/index.js`:
+    - `transformAllPhrases(text, transformFn)` — walks every line, skips blanks and `#` comments, splits off the leading `//` toggle prefix (if any) and any trailing inline `// comment`, then runs `transformFn` on the raw phrase content (preserving `[group]` tags so backend processing still strips them correctly). Reassembles `prefix + transformed + inlineComment`
+    - `setAllWeights(text, w)` — clamps to `[CONFIG.minWeight, CONFIG.maxWeight]` (0.1 – 2.0), rounds to 0.1, delegates per line to existing `setWeight()`
+    - `adjustAllWeights(text, delta)` — delegates per line to existing `adjustWeight()` (which already handles clamping and out-of-range special cases)
+  - UI panel `openBulkWeightEditor(node, anchorEvent)`:
+    - Floating HTML overlay (`position: fixed`, `z-index: 10000`) with `<input type="number">` + Apply button (absolute set) AND `−0.1` / `+0.1` buttons (immediate relative adjust). Esc / click-outside / ✕ closes
+    - Theme variables (`var(--comfy-menu-bg)`, `var(--input-text)`, `var(--border-color)`) for styling
+    - After each apply: clears `preview_override` (so override doesn't shadow the new weights), calls `node._ppDomRender()` if present, calls `app.graph.setDirtyCanvas(true)`
+    - Viewport clamping after mount so the panel never spills off-screen
+    - `setTimeout(10)` deferral on the outside-click listener so the originating click doesn't immediately close the panel
+  - Mode integrations:
+    - Classic: new `"Set All Weights"` button widget added in `addEditButton()` BEFORE the existing Edit button so it renders above Edit. No native event in LiteGraph button callbacks, so the panel is anchored by computing screen coordinates from `node.pos` + `canvas.ds` transform
+    - Nodes 2.0: new `"W±"` button (`.pp-weight-bulk-btn` class) appended in the display-mode toolbar AFTER the Edit button — Edit has `margin-left: auto` so it sits to the right of Edit. Uses the native click event's `clientX/Y` for anchoring
+  - **Affects ALL phrases including `//`-commented ones**, so users can pre-set weights before activating phrases
+- ✅ **Layout fix: Hide Preview no longer overlaps the checkbox area in Classic display mode**:
+  - Root cause: `getWidgetsTotalHeight()` is a static estimate that summed each visible widget's `computeSize()` plus margin. The multiline `prefix` widget in particular doesn't always render at the height its `computeSize` returns (the HTML textarea overlay can extend it). When the new "Set All Weights" button was added, the cumulative drift exceeded the small bottom padding and the buttons started rendering below where our checkbox area began
+  - Fix: New `getRenderedWidgetAreaBottom(node)` reads `widget.last_y` (set by LiteGraph after a widget is drawn) for the visually-lowest visible widget and adds its computed height. Used by drawing functions (`drawCheckboxList`, `drawCheckboxItems` fallback, `drawGroupControls`, "No Text" placeholder) so the checkbox area always starts AT the real bottom of the widget block. Falls back to `getWidgetsTotalHeight()` on the very first draw before `last_y` is set
+  - `nodeType.prototype.computeSize` deliberately still uses `getWidgetsTotalHeight()` because it's called before any draw has happened
+- ✅ **`empty_when_no_selection` toggle (returns `None`)**: New BOOLEAN input (default `False`) that returns `(None, None, None)` on every output when no phrase is selected. Targeted at switch/router nodes that check `value is None` — specifically **rgthree's Any Switch** (`is_none()` does `return value is None`, so empty strings are NOT enough; we must emit literal Python None to trigger its skip path). Iterated across May 22–23: `false_when_empty` returning Python `False` → empty strings `("", "", [])` → ExecutionBlocker for true bypass → reverted to empty strings → settled on `None` for rgthree-switch compatibility
+  - Backend (`nodes.py`):
+    - Added as the last entry of V3 schema inputs and V1 `INPUT_TYPES.optional` (preserves `widgets_values` index stability)
+    - `execute()` short-circuit after the `preview_override` check: `if empty_when_no_selection and not filtered_lines: return (None, None, None)` (or `io.NodeOutput(None, None, None)` in V3)
+    - **`prefix` is intentionally NOT prepended** in this path; separator, trailing_separator, and add_newline are also skipped
+    - `preview_override` always wins (override is explicit user intent)
+    - **NOT using `ExecutionBlocker`**: deliberate design choice. Switches/routers downstream should decide per-pipeline what to do with None — we don't want to forcibly skip the entire downstream graph
+    - **Caveat**: downstream nodes that don't gracefully handle `None` will error. The toggle is intended for pipelines where the next hop IS a switch/router/None-handler
+  - Frontend (`web/index.js`):
+    - `PP_INPUT_ORDER` extended to include `'empty_when_no_selection'` at the end
+    - `findEmptyWhenNoSelectionWidget(node)` helper
+    - Hidden by default; toggled visible only in Edit mode (Classic) via `widget.hidden = !node.isEditMode`
+    - Nodes 2.0: backed up into `_ppWidgetRefs.empty_when_no_selection` and removed from `node.widgets[]` like other Nodes 2.0 widgets; surfaced as `"Empty if no sel"` checkbox in the DOM widget's edit-mode options row
+    - `api.queuePrompt` patch automatically forwards the value because it iterates `_ppWidgetRefs`
+  - Backward compat: `sanitizeLegacyPrefixValues()` extended to reset non-boolean `empty_when_no_selection` values (LiteGraph maps `widgets_values` by index, so an older save without this input could land a stray button-label string at this slot). Also added `'set_all_weights'` to the `prefix` sanitization blocklist for the same reason
 
 ### Recent Changes (May 20, 2026)
 - ✅ **`prefix` redesigned as widget + new `prefix_separator` toggle**: `prefix` is no longer a forced-input slot — it is now a multiline STRING widget concatenated directly before the body. A new BOOLEAN `prefix_separator` (default `False`) controls whether the configured `separator` is inserted between `prefix` and the body
