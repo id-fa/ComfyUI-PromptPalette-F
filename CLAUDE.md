@@ -4,7 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-ComfyUI-PromptPalette-F is a custom node for ComfyUI that provides an interactive prompt editing interface with checkbox-based phrase toggling and weight adjustment controls.
+ComfyUI-PromptPalette-F is a ComfyUI extension that bundles one rich interactive node (`PromptPalette_F`) and several lightweight UI-less utility nodes. The flagship node provides a checkbox-based phrase toggling and weight adjustment interface; the utilities exist to chain prompts together and post-process string outputs from any node.
+
+Bundled nodes:
+- **PromptPalette_F** (`PromptPalette-F`) — full interactive prompt editor with dual-mode frontend (Classic LiteGraph + Nodes 2.0 DOM widget)
+- **SimpleMultiConcatText** (`Simple Multi Concat Text`) — UI-less, joins up to 5 text inputs with a separator
+- **GetFirstWord** (`Get First Word`) — UI-less, returns the text before the first occurrence of a stop word (literal or regex)
+- **GetFirstWordList** (`Get First Word (List)`) — UI-less, applies Get First Word to every item of a LIST input, outputs both joined STRING and a LIST
 
 ## Architecture
 
@@ -75,7 +81,40 @@ The project follows ComfyUI's custom node structure with V3 API compliance and d
    - **Conditional return format**: Returns `io.NodeOutput(text, selected_text, selected_list)` if V3 available, tuple otherwise
    - **V3 Extension**: Only defined if V3 API available, exported via `comfy_entrypoint()` async function
 
-2. **Web Extension - Adaptive Dual Mode** (`web/index.js`):
+2. **SimpleMultiConcatText Node** (`nodes.py`):
+   - **UI-less utility**: no frontend code, no widgets registered through `web/index.js`
+   - **Inputs (all optional)**: `text1`–`text5` (STRING with `forceInput: True`, wire-only), `separator` (STRING, default `""`), `separator_newline` (BOOLEAN, default `False`), `add_newline` (BOOLEAN, default `False`)
+   - **Output**: `text` (STRING) — non-empty inputs joined with the effective separator
+   - **Empty-input handling**: inputs that are `None`, non-strings, or empty strings are filtered out before joining. Avoids `"a,,b"`-style runs of separators when only some slots are wired
+   - **`separator_newline` semantics**: when ON, a `"\n"` is appended to `separator`. Critically, this works **even when `separator=""`** — the effective separator becomes a bare `"\n"`, joining inputs line-by-line. This is intentional so users can get newline-joined output without typing a literal newline into the separator widget
+   - **`add_newline` skip when empty**: trailing newline is suppressed if zero valid inputs survived filtering (avoids a lone `"\n"` output for a fully-unconnected node)
+   - **V3/V1 hybrid**: same conditional pattern as `PromptPalette_F` — V3 `define_schema` with `io.String.Input`/`io.Boolean.Input` when V3 available, V1 `INPUT_TYPES` always defined
+   - Tooltips supplied on every widget via the V1 `tooltip` option
+
+3. **GetFirstWord Node** (`nodes.py`):
+   - **UI-less utility**: returns the portion of `text` before the first occurrence of `stop_word`
+   - **Inputs**: `text` (STRING, optional, `forceInput: True`), `stop_word` (STRING, default `","`), `use_regex` (BOOLEAN, default `False`), `trim` (BOOLEAN, default `True`), `remove_invalid_filename_chars` (BOOLEAN, default `False`), `add_trailing_slash` (BOOLEAN, default `False`)
+   - **Output**: `text` (STRING)
+   - **`use_regex` modes**:
+     - OFF (literal): `stop_word` is taken as a literal string, with escape sequences `\n`, `\r`, `\t` pre-expanded so a single-line widget can specify control characters by typing the escape sequence literally
+     - ON (regex): `stop_word` is compiled as a regex via `re.search`. Escape expansion is intentionally **skipped** — `\n`/`\t` are valid regex syntax and would otherwise be double-expanded. Invalid regex patterns fall through to "return the whole text" (`re.error` is caught silently — never raises)
+   - **Empty `stop_word`**: returns the whole `text` (avoids `str.split("")` ValueError and `re.search("")` matching position 0)
+   - **`remove_invalid_filename_chars`**: regex `[<>:"/\\|?*\x00-\x1f]` strips Windows-forbidden filename characters, then `rstrip(". ")` removes trailing dots/spaces (also Windows-forbidden). Reserved DOS names (CON, PRN, etc.) are **not** stripped — they're filename-level prohibitions, not character-level
+   - **`add_trailing_slash`**: appends `/` only when the result is non-empty (avoids emitting a bare `/`)
+   - **`process_one()` classmethod** (`nodes.py:GetFirstWord.process_one`) — core transform extracted from `execute()` so `GetFirstWordList` can reuse the exact same logic without duplication
+   - **V3/V1 hybrid**: same conditional pattern as other nodes
+
+4. **GetFirstWordList Node** (`nodes.py`):
+   - **UI-less utility**: applies `GetFirstWord.process_one()` to every element of a LIST input
+   - **Inputs**: `items` (LIST, optional, `forceInput: True`), all of `GetFirstWord`'s configuration inputs, plus `text_separator` (STRING, default `", "`)
+   - **Outputs**:
+     - `text` (STRING) — `text_separator.join(results)`
+     - `list` (LIST) — the raw `results` list (unaffected by `text_separator`)
+   - **`items` defensive coercion**: `None` → `[]`; `tuple`/`set` → `list`; bare `str` → single-item list (or `[]` if empty); anything else → `[]`. Per-element: `None` skipped, non-strings coerced via `str()`. Goal is "never raise on a wrong-typed slot"
+   - **V3 schema caveat**: V3 has no first-class LIST input/output type, so the V3 `define_schema` declares both as `io.String.*`. The V1 `INPUT_TYPES` and `RETURN_TYPES`/`RETURN_NAMES` carry the actual `"LIST"` type, and ComfyUI passes a real Python list at execute time regardless. Same pattern as `PromptPalette_F.selected_list`
+   - **No `add_newline` / `separator_newline`**: kept minimal — if newline-joining is needed, the user can chain through `SimpleMultiConcatText` with a single wired input, or set `text_separator` to `"\n"` directly
+
+5. **Web Extension - Adaptive Dual Mode** (`web/index.js`):
    - **Single Unified Registration**: Single extension "PromptPalette_F" that adapts to rendering mode
    - **Adaptive Mode Detection via Callbacks**:
      - `onNodeCreated`: Sets up both Classic and Nodes 2.0 features initially
@@ -404,11 +443,11 @@ This project requires no build process or package management - it's a pure Comfy
 - **Preview System**: Preview generation, rendering, scrolling, edit/reset buttons (Classic mode only)
 - **Entry Point**: Extension registration
 
-### nodes.py Structure (~235 lines):
-- **V3 API Conditional Imports**: try/except block for `comfy_api.latest` imports, `V3_AVAILABLE` flag, dummy `ComfyNode` class
+### nodes.py Structure (~560 lines):
+- **V3 API Conditional Imports**: try/except block for `comfy_api.latest` imports, `V3_AVAILABLE` flag, dummy `ComfyNode` class. Pyright reports `io is possibly unbound` and `comfy_api.latest could not be resolved` warnings under the `if V3_AVAILABLE:` guards — these are by design and gated at runtime, safe to ignore
 - **Base Class Selection**: Conditionally inherit from `io.ComfyNode` or `object`
-- **Class Definition**: `PromptPalette_F` class with conditional V3/V1 support
-  - Conditional V3 `define_schema()` classmethod with all inputs (text, separator, trailing_separator, separator_newline, add_newline, preview_override, prefix, prefix_separator, false_when_empty) and 3 outputs (text, selected_text, selected_list)
+- **`PromptPalette_F` class**: V3/V1 hybrid
+  - Conditional V3 `define_schema()` classmethod with all inputs (text, separator, trailing_separator, separator_newline, add_newline, preview_override, prefix, prefix_separator, empty_when_no_selection) and 3 outputs (text, selected_text, selected_list)
   - V1 `INPUT_TYPES()` classmethod with the same inputs in the same order
   - V1-style class attributes: `RETURN_TYPES = ("STRING", "STRING", "LIST")`, `RETURN_NAMES = ("text", "selected_text", "selected_list")`, `FUNCTION`, `CATEGORY`
   - `remove_group_tags_with_escape()` staticmethod
@@ -417,11 +456,23 @@ This project requires no build process or package management - it's a pure Comfy
     - Builds `filtered_lines` (with `//`-filter and `[group]`-strip)
     - Builds `selected_list` (weights stripped, empties removed) and `selected_text = "\n".join(selected_list)` — these reflect actual selection regardless of override
     - `preview_override` early return: `text` = override, list outputs still reflect real selection
-    - `false_when_empty` short-circuit: returns `(False, False, False)` when toggle is ON and `filtered_lines` is empty (prefix NOT prepended)
+    - `empty_when_no_selection` short-circuit: returns `(None, None, None)` when toggle is ON and `filtered_lines` is empty (prefix NOT prepended)
     - Normal path: applies `separator`, `prefix`, `prefix_separator`, `trailing_separator`, `add_newline`
     - Conditional return format: `io.NodeOutput(...)` if V3 available, tuple otherwise
-- **V3 Extension**: `PromptPaletteExtension` and `comfy_entrypoint`, only if `V3_AVAILABLE`
-- **V1 Legacy Exports**: `NODE_CLASS_MAPPINGS`, `NODE_DISPLAY_NAME_MAPPINGS`, `WEB_DIRECTORY` (always defined)
+- **`SimpleMultiConcatText` class**: UI-less, 5-text concat utility
+  - V3 schema with `text1`–`text5` as optional `io.String.Input` + `separator`/`separator_newline`/`add_newline`; V1 INPUT_TYPES marks `text1`–`text5` with `forceInput: True` so they appear as connectable slots, not widgets
+  - `execute()`: filters empty/None inputs, computes `effective_separator = separator + "\n" if separator_newline else separator` (works for `separator=""` too — yields bare `"\n"`), skips `add_newline` when zero valid inputs
+- **`GetFirstWord` class**: UI-less, "split-and-take-first" utility
+  - V3 schema with `text` (optional) + literal/regex stop word + post-process toggles
+  - `_WINDOWS_INVALID_CHARS` class attribute (compiled regex `[<>:"/\\|?*\x00-\x1f]`)
+  - **`process_one()` classmethod**: extracted core logic so `GetFirstWordList` reuses it. Handles literal/regex modes, escape expansion (literal only), trim, Windows-invalid char stripping + trailing `. ` strip, optional trailing slash. Catches `re.error` silently
+  - `execute()`: thin wrapper that calls `process_one()` and returns V3/V1 format
+- **`GetFirstWordList` class**: UI-less, "Get First Word over LIST" utility
+  - V3 schema declares LIST as `io.String.*` (V3 has no first-class LIST type) — actual list type comes from V1 `INPUT_TYPES "LIST"` and V1 `RETURN_TYPES`/`RETURN_NAMES`
+  - `RETURN_TYPES = ("STRING", "LIST")`, `RETURN_NAMES = ("text", "list")`
+  - `execute()`: defensive coercion for `items` (None/tuple/set/str/wrong-type all handled), calls `GetFirstWord.process_one()` for each element, joins with `text_separator` for the `text` output, returns raw results for the `list` output
+- **V3 Extension**: `PromptPaletteExtension.get_node_list()` returns all four classes — `PromptPalette_F`, `SimpleMultiConcatText`, `GetFirstWord`, `GetFirstWordList`. Only defined if `V3_AVAILABLE`
+- **V1 Legacy Exports**: `NODE_CLASS_MAPPINGS`, `NODE_DISPLAY_NAME_MAPPINGS`, `WEB_DIRECTORY` (always defined). All four nodes registered
 
 ### __init__.py Structure (5 lines):
 - **V1-only Entry Point**: Imports and exports V1 mappings directly from nodes.py
@@ -445,6 +496,22 @@ This project includes `pyproject.toml` for ComfyUI registry publication followin
 - **Repository**: https://github.com/id-fa/ComfyUI-PromptPalette-F
 
 ## Development Status
+
+### Recent Changes (May 30, 2026)
+- ✅ **Three UI-less utility nodes added** (`nodes.py`): no frontend code, no `web/index.js` changes
+  - **`SimpleMultiConcatText`** (display: `Simple Multi Concat Text`): 5 optional STRING inputs (`text1`–`text5`, all `forceInput: True` — wire-only, no widget), `separator` (default `""`), `separator_newline`, `add_newline`. Empty/None/non-string inputs are filtered before joining (avoids `"a,,b"`-style runs). `separator_newline=True` works **even when `separator=""`** — effective separator becomes a bare `"\n"`, joining inputs line-by-line. `add_newline` is skipped when zero valid inputs survived filtering (avoids a lone `"\n"` output for an unconnected node)
+  - **`GetFirstWord`** (display: `Get First Word`): single STRING input + `stop_word` (default `","`) + `use_regex` / `trim` / `remove_invalid_filename_chars` / `add_trailing_slash` toggles
+    - Literal mode (`use_regex=False`): `\n` / `\r` / `\t` are pre-expanded so a single-line widget can specify control characters by typing the escape sequence; uses `str.split(stop_word, 1)[0]`
+    - Regex mode (`use_regex=True`): escape expansion is intentionally **skipped** (regex handles `\n` natively, double expansion would be wrong); uses `re.search`. `re.error` on invalid patterns is caught silently and falls through to "return the whole text" — never raises
+    - Empty `stop_word` returns whole text (avoids `str.split("")` ValueError)
+    - `remove_invalid_filename_chars`: strips `[<>:"/\\|?*\x00-\x1f]` + `rstrip(". ")` (Windows-forbidden trailing chars). DOS reserved names (CON/PRN/etc.) are NOT handled — they're filename-level, not character-level
+    - `add_trailing_slash`: only appends `/` when result is non-empty (avoids bare `/` output)
+    - Core logic extracted into `process_one()` classmethod so `GetFirstWordList` can reuse it
+  - **`GetFirstWordList`** (display: `Get First Word (List)`): LIST input + same toggles as `GetFirstWord` + `text_separator` (default `", "`)
+    - Two outputs: `text` (STRING, joined with `text_separator`) and `list` (LIST, raw results — separator doesn't affect this)
+    - Defensive `items` coercion: `None` → `[]`; `tuple`/`set` → `list`; bare `str` → single-item list (or `[]` if empty); anything else → `[]`. Per-element: `None` skipped, non-strings coerced via `str()`. Never raises on a wrong-typed slot
+    - V3 schema declares LIST input/output as `io.String.*` because V3 has no first-class LIST type; V1 `INPUT_TYPES "LIST"` + V1 `RETURN_TYPES` carry the real type. ComfyUI passes a Python list at execute time regardless (same pattern as `PromptPalette_F.selected_list`)
+  - All three nodes registered in `PromptPaletteExtension.get_node_list()` (V3) and `NODE_CLASS_MAPPINGS` / `NODE_DISPLAY_NAME_MAPPINGS` (V1), category `utils`
 
 ### Recent Changes (May 23, 2026)
 - ✅ **Widget hover tooltips (both modes)**: Added per-widget help text shown on mouse hover

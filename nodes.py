@@ -257,6 +257,309 @@ class PromptPalette_F(BaseNodeClass):
             return (result, selected_text, selected_list)
 
 
+class SimpleMultiConcatText(BaseNodeClass):
+    """Concatenate up to 5 text inputs with an optional separator. UI-less utility."""
+
+    if V3_AVAILABLE:
+        @classmethod
+        def define_schema(cls):
+            return io.Schema(
+                node_id="SimpleMultiConcatText",
+                display_name="Simple Multi Concat Text",
+                category="utils",
+                inputs=[
+                    io.String.Input("text1", optional=True, default=""),
+                    io.String.Input("text2", optional=True, default=""),
+                    io.String.Input("text3", optional=True, default=""),
+                    io.String.Input("text4", optional=True, default=""),
+                    io.String.Input("text5", optional=True, default=""),
+                    io.String.Input("separator", default=""),
+                    io.Boolean.Input("separator_newline", default=False),
+                    io.Boolean.Input("add_newline", default=False),
+                ],
+                outputs=[
+                    io.String.Output(display_name="text"),
+                ],
+            )
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {},
+            "optional": {
+                "text1": ("STRING", {"forceInput": True}),
+                "text2": ("STRING", {"forceInput": True}),
+                "text3": ("STRING", {"forceInput": True}),
+                "text4": ("STRING", {"forceInput": True}),
+                "text5": ("STRING", {"forceInput": True}),
+                "separator": ("STRING", {
+                    "default": "",
+                    "tooltip": "Separator inserted between non-empty inputs (default: empty string).",
+                }),
+                "separator_newline": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Append a newline after each separator.",
+                }),
+                "add_newline": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Append a newline at the end of the output. Skipped when there are no non-empty inputs.",
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("text",)
+    FUNCTION = "execute"
+    CATEGORY = "utils"
+
+    @classmethod
+    def execute(cls, text1="", text2="", text3="", text4="", text5="",
+                separator="", separator_newline=False, add_newline=False):
+        raw_inputs = [text1, text2, text3, text4, text5]
+        # Coerce non-string / None to "" so unconnected slots don't break us.
+        valid_inputs = [t for t in raw_inputs if isinstance(t, str) and t != ""]
+
+        if not isinstance(separator, str):
+            separator = ""
+
+        # separator_newline appends a newline to the separator. When separator
+        # is empty AND separator_newline is on, the effective separator becomes
+        # a bare "\n" so inputs are joined line-by-line.
+        effective_separator = separator + "\n" if separator_newline else separator
+        result = effective_separator.join(valid_inputs)
+
+        if add_newline and valid_inputs:
+            result += "\n"
+
+        if V3_AVAILABLE:
+            return io.NodeOutput(result)
+        else:
+            return (result,)
+
+
+class GetFirstWord(BaseNodeClass):
+    """Return the portion of text before the first occurrence of stop_word. UI-less utility."""
+
+    # Windows-invalid filename characters: <>:"/\|?* and control chars 0x00-0x1F.
+    _WINDOWS_INVALID_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+    if V3_AVAILABLE:
+        @classmethod
+        def define_schema(cls):
+            return io.Schema(
+                node_id="GetFirstWord",
+                display_name="Get First Word",
+                category="utils",
+                inputs=[
+                    io.String.Input("text", optional=True, default=""),
+                    io.String.Input("stop_word", default=","),
+                    io.Boolean.Input("use_regex", default=False),
+                    io.Boolean.Input("trim", default=True),
+                    io.Boolean.Input("remove_invalid_filename_chars", default=False),
+                    io.Boolean.Input("add_trailing_slash", default=False),
+                ],
+                outputs=[
+                    io.String.Output(display_name="text"),
+                ],
+            )
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {},
+            "optional": {
+                "text": ("STRING", {"forceInput": True}),
+                "stop_word": ("STRING", {
+                    "default": ",",
+                    "tooltip": "Output everything before the first occurrence of this string (default: comma). Escape sequences \\n, \\r, \\t are expanded so newlines/tabs can be typed in the single-line widget. When use_regex is ON, this is interpreted as a regular expression instead and escape expansion is skipped.",
+                }),
+                "use_regex": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Interpret stop_word as a regular expression. Invalid patterns fall through (return the whole text). When ON, escape expansion is skipped — write \\n / \\t directly in the regex.",
+                }),
+                "trim": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Strip leading/trailing whitespace and newlines from the result.",
+                }),
+                "remove_invalid_filename_chars": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Remove characters Windows forbids in filenames: <>:\"/\\|?* and control chars, plus trailing dots/spaces.",
+                }),
+                "add_trailing_slash": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Append a / to use the result as a folder path. Skipped when the result is empty.",
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("text",)
+    FUNCTION = "execute"
+    CATEGORY = "utils"
+
+    @classmethod
+    def process_one(cls, text, stop_word, use_regex, trim,
+                    remove_invalid_filename_chars, add_trailing_slash):
+        """Core transform — shared with GetFirstWordList. Returns a string."""
+        if not isinstance(text, str):
+            text = ""
+        if not isinstance(stop_word, str):
+            stop_word = ","
+
+        if use_regex:
+            # Regex mode: don't pre-expand escapes — \n / \t / \r are valid regex
+            # syntax and will be interpreted by `re` itself. Invalid patterns
+            # fall through to "return the whole text" instead of erroring.
+            if stop_word != "":
+                try:
+                    m = re.search(stop_word, text)
+                    result = text[:m.start()] if m else text
+                except re.error:
+                    result = text
+            else:
+                result = text
+        else:
+            # Literal mode: expand common escape sequences so a single-line widget
+            # can specify newline/tab/CR as the stop_word by typing \n / \r / \t.
+            # Wire-connected stop_word values that already contain real newlines
+            # are unaffected (no \n substring to replace).
+            stop_word = stop_word.replace("\\n", "\n").replace("\\r", "\r").replace("\\t", "\t")
+            # Split by stop_word; an empty stop_word would raise ValueError on str.split,
+            # so fall through to the whole text in that case.
+            if stop_word != "":
+                result = text.split(stop_word, 1)[0]
+            else:
+                result = text
+
+        if trim:
+            result = result.strip()
+
+        if remove_invalid_filename_chars:
+            result = cls._WINDOWS_INVALID_CHARS.sub("", result)
+            # Windows also forbids trailing dots and spaces in filenames.
+            result = result.rstrip(". ")
+
+        if add_trailing_slash and result != "":
+            result += "/"
+
+        return result
+
+    @classmethod
+    def execute(cls, text="", stop_word=",", use_regex=False, trim=True,
+                remove_invalid_filename_chars=False, add_trailing_slash=False):
+        result = cls.process_one(
+            text, stop_word, use_regex, trim,
+            remove_invalid_filename_chars, add_trailing_slash,
+        )
+        if V3_AVAILABLE:
+            return io.NodeOutput(result)
+        else:
+            return (result,)
+
+
+class GetFirstWordList(BaseNodeClass):
+    """Apply Get First Word to every item in a LIST input. UI-less utility."""
+
+    if V3_AVAILABLE:
+        @classmethod
+        def define_schema(cls):
+            return io.Schema(
+                node_id="GetFirstWordList",
+                display_name="Get First Word (List)",
+                category="utils",
+                inputs=[
+                    # V3 has no first-class LIST input — declare String here
+                    # and rely on V1 INPUT_TYPES "LIST" for the real slot type.
+                    # ComfyUI passes the actual Python list at execute time.
+                    io.String.Input("items", optional=True),
+                    io.String.Input("stop_word", default=","),
+                    io.Boolean.Input("use_regex", default=False),
+                    io.Boolean.Input("trim", default=True),
+                    io.Boolean.Input("remove_invalid_filename_chars", default=False),
+                    io.Boolean.Input("add_trailing_slash", default=False),
+                    io.String.Input("text_separator", default=", "),
+                ],
+                outputs=[
+                    io.String.Output(display_name="text"),
+                    io.String.Output(display_name="list"),
+                ],
+            )
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {},
+            "optional": {
+                "items": ("LIST", {"forceInput": True}),
+                "stop_word": ("STRING", {
+                    "default": ",",
+                    "tooltip": "Same semantics as Get First Word's stop_word. Escape sequences \\n, \\r, \\t are expanded when use_regex is OFF.",
+                }),
+                "use_regex": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Interpret stop_word as a regular expression. Invalid patterns fall through (return the item as-is).",
+                }),
+                "trim": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Strip leading/trailing whitespace and newlines from each result.",
+                }),
+                "remove_invalid_filename_chars": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Remove Windows-forbidden filename characters (<>:\"/\\|?* and control chars, plus trailing dots/spaces) from each result.",
+                }),
+                "add_trailing_slash": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Append / to non-empty results.",
+                }),
+                "text_separator": ("STRING", {
+                    "default": ", ",
+                    "tooltip": "Separator used to join all results into the `text` output. The `list` output is unaffected.",
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "LIST")
+    RETURN_NAMES = ("text", "list")
+    FUNCTION = "execute"
+    CATEGORY = "utils"
+
+    @classmethod
+    def execute(cls, items=None, stop_word=",", use_regex=False, trim=True,
+                remove_invalid_filename_chars=False, add_trailing_slash=False,
+                text_separator=", "):
+        # Defensive coercion: an unconnected slot or a wrong-typed upstream
+        # shouldn't crash the node. Accept list/tuple/set as list-like; treat
+        # a bare string as a single-item list; anything else becomes empty.
+        if items is None:
+            items = []
+        elif isinstance(items, (tuple, set)):
+            items = list(items)
+        elif isinstance(items, str):
+            items = [items] if items else []
+        elif not isinstance(items, list):
+            items = []
+
+        if not isinstance(text_separator, str):
+            text_separator = ", "
+
+        results = []
+        for item in items:
+            if item is None:
+                continue
+            text = item if isinstance(item, str) else str(item)
+            results.append(GetFirstWord.process_one(
+                text, stop_word, use_regex, trim,
+                remove_invalid_filename_chars, add_trailing_slash,
+            ))
+
+        text_out = text_separator.join(results)
+
+        if V3_AVAILABLE:
+            return io.NodeOutput(text_out, results)
+        else:
+            return (text_out, results)
+
+
 # V3 Extension entrypoint (only if V3 is available)
 if V3_AVAILABLE:
     class PromptPaletteExtension(ComfyExtension):
@@ -265,13 +568,23 @@ if V3_AVAILABLE:
             return os.path.join(os.path.dirname(os.path.realpath(__file__)), "web")
 
         async def get_node_list(self):
-            return [PromptPalette_F]
+            return [PromptPalette_F, SimpleMultiConcatText, GetFirstWord, GetFirstWordList]
 
     async def comfy_entrypoint():
         return PromptPaletteExtension()
 
 
 # Legacy V1 exports for backward compatibility
-NODE_CLASS_MAPPINGS = {"PromptPalette_F": PromptPalette_F}
-NODE_DISPLAY_NAME_MAPPINGS = {"PromptPalette_F": "PromptPalette-F"}
+NODE_CLASS_MAPPINGS = {
+    "PromptPalette_F": PromptPalette_F,
+    "SimpleMultiConcatText": SimpleMultiConcatText,
+    "GetFirstWord": GetFirstWord,
+    "GetFirstWordList": GetFirstWordList,
+}
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "PromptPalette_F": "PromptPalette-F",
+    "SimpleMultiConcatText": "Simple Multi Concat Text",
+    "GetFirstWord": "Get First Word",
+    "GetFirstWordList": "Get First Word (List)",
+}
 WEB_DIRECTORY = os.path.join(os.path.dirname(os.path.realpath(__file__)), "web")
