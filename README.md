@@ -225,16 +225,14 @@ output_%date:yyyy-MM-dd%/%KSampler.seed%
 
 トークンを手打ちしなくても、ノード上の **「🔍 ノードの値を挿入…」** ボタンからモーダルを開いて挿入できます。
 
-**ノードの値**:
+1. プルダウンから対象を選択します。一覧には **「📅 日付フォーマット」** 項目と、ウィジェットを持つ各ノードのタイトル（自ノードは除外）が並びます
+2. 選択に応じて下のリストが切り替わります:
+   - **ノードタイトルを選択** → そのノードのウィジェット名と現在値の一覧
+   - **「📅 日付フォーマット」を選択** → `%date:…%` のサンプル（`yyyy-MM-dd`、`yyyy-MM-dd_hh-mm-ss` など）とライブプレビューの一覧
+3. 挿入したい行をクリックして選択（ダブルクリックで即挿入＆モーダル維持）
+4. **「挿入」ボタン**で、`template` のカーソル位置にトークンを挿入
 
-1. ノードタイトルのプルダウンから参照したいノードを選択（ウィジェットを持つ他のノードのみ表示。自ノードは除外）
-2. そのノードのウィジェット名と現在値の一覧が表示されるので、挿入したい行をクリックして選択（ダブルクリックで即挿入＆モーダル維持）
-
-**日付フォーマット**:
-
-- モーダル下部に `%date:…%` のサンプル（`yyyy-MM-dd`、`yyyy-MM-dd_hh-mm-ss` など）とそのプレビューが並ぶので、使いたいものをクリックして選択
-
-いずれも行を選択して **「挿入」ボタン**を押すと、`template` のカーソル位置にトークンが挿入されます（ノードの値・日付はどちらか一方を選択）。参照できるノードが無くても日付フォーマットは利用できます。
+参照できるノードが無くても、プルダウンの「日付フォーマット」項目は常に利用できます。
 
 
 ### 仕組みと注意点
@@ -486,18 +484,14 @@ output_%date:yyyy-MM-dd%/%KSampler.seed%
 
 Instead of typing tokens by hand, click the **"🔍 ノードの値を挿入… / Insert token"** button on the node to open a modal.
 
-**Node value:**
+1. Pick a target from the dropdown. It lists a **"📅 日付フォーマット" (date format)** entry plus each node title that has widgets (the node itself is excluded).
+2. The list below switches based on your choice:
+   - **A node title** → that node's widget names and current values.
+   - **The date-format entry** → `%date:…%` samples (`yyyy-MM-dd`, `yyyy-MM-dd_hh-mm-ss`, etc.) with live previews.
+3. Click a row to select it (double-click inserts immediately and keeps the modal open).
+4. Click **Insert** to drop the token at the caret position in `template`.
 
-1. Pick the source node from the **node-title dropdown** (only other nodes that have widgets are listed; the node itself is excluded).
-2. Its **widget names and current values** are listed — click a row to select it (double-click inserts immediately and keeps the modal open).
-
-**Date format:**
-
-- A list of `%date:…%` samples (`yyyy-MM-dd`, `yyyy-MM-dd_hh-mm-ss`, etc.) with live previews sits at the bottom of the modal — click one to select it.
-
-Either way, with a row selected click **Insert** to drop the token at the caret position in `template` (node value and date are mutually exclusive — one at a time). Date formats are available even when there are no other nodes to reference.
-
-The node widget list is only expanded for the one node you pick, so it stays fast even with many nodes in the graph. Works in both Classic and Nodes 2.0 modes.
+The date-format entry is always available even when there are no other nodes to reference. The node widget list is only expanded for the one node you pick, so it stays fast even with many nodes in the graph. Works in both Classic and Nodes 2.0 modes.
 
 ### How it works & caveats
 
