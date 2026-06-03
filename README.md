@@ -199,13 +199,42 @@ seed=%KSampler.seed%, cfg=%KSampler.cfg%
 
 `KSampler` というタイトルのノードの `seed` / `cfg` ウィジェットの値に置き換わります。
 
+### 日付トークン `%date:format%`
+
+ComfyUI標準の `Save Image` と同様に、日付・時刻を埋め込めます。
+
+```
+output_%date:yyyy-MM-dd%/%KSampler.seed%
+→ output_2026-06-03/12345
+```
+
+| トークン | 意味 | 例 |
+| --- | --- | --- |
+| `yyyy` / `yy` | 年（4桁／2桁） | `2026` / `26` |
+| `MM` / `M` | 月（2桁／ゼロ埋めなし） | `06` / `6` |
+| `dd` / `d` | 日（2桁／ゼロ埋めなし） | `03` / `3` |
+| `hh` / `h` | 時（24時間制） | `09` / `9` |
+| `mm` / `m` | 分 | `07` / `7` |
+| `ss` / `s` | 秒 | `04` / `4` |
+
+- `%date%` だけ書くと `%date:yyyy-MM-dd%`（＝`yyyy-MM-dd`）として展開されます。
+- トークン以外の文字（`-` `_` `/` など）はそのまま残ります。
+- 展開は Queue 実行時のブラウザのローカル時刻を使用します。
+
 ### 値の挿入ヘルパー（モーダル）
 
 トークンを手打ちしなくても、ノード上の **「🔍 ノードの値を挿入…」** ボタンからモーダルを開いて挿入できます。
 
+**ノードの値**:
+
 1. ノードタイトルのプルダウンから参照したいノードを選択（ウィジェットを持つ他のノードのみ表示。自ノードは除外）
 2. そのノードのウィジェット名と現在値の一覧が表示されるので、挿入したい行をクリックして選択（ダブルクリックで即挿入＆モーダル維持）
-3. 「挿入」ボタンで、`template` のカーソル位置に `%タイトル.ウィジェット名%` トークンを挿入
+
+**日付フォーマット**:
+
+- モーダル下部に `%date:…%` のサンプル（`yyyy-MM-dd`、`yyyy-MM-dd_hh-mm-ss` など）とそのプレビューが並ぶので、使いたいものをクリックして選択
+
+いずれも行を選択して **「挿入」ボタン**を押すと、`template` のカーソル位置にトークンが挿入されます（ノードの値・日付はどちらか一方を選択）。参照できるノードが無くても日付フォーマットは利用できます。
 
 
 ### 仕組みと注意点
@@ -431,15 +460,44 @@ seed=%KSampler.seed%, cfg=%KSampler.cfg%
 
 is replaced with the `seed` / `cfg` widget values of the node titled `KSampler`.
 
+### Date token `%date:format%`
+
+Just like ComfyUI's built-in `Save Image`, you can embed the current date/time.
+
+```
+output_%date:yyyy-MM-dd%/%KSampler.seed%
+→ output_2026-06-03/12345
+```
+
+| Token | Meaning | Example |
+| --- | --- | --- |
+| `yyyy` / `yy` | Year (4-digit / 2-digit) | `2026` / `26` |
+| `MM` / `M` | Month (zero-padded / plain) | `06` / `6` |
+| `dd` / `d` | Day (zero-padded / plain) | `03` / `3` |
+| `hh` / `h` | Hour (24-hour) | `09` / `9` |
+| `mm` / `m` | Minute | `07` / `7` |
+| `ss` / `s` | Second | `04` / `4` |
+
+- A bare `%date%` expands as `%date:yyyy-MM-dd%`.
+- Any non-token characters (`-`, `_`, `/`, etc.) are kept verbatim.
+- The value uses the browser's local time at queue time.
+
 ### Insert helper (modal)
 
-Instead of typing tokens by hand, click the **"🔍 ノードの値を挿入… / Insert node value"** button on the node to open a modal:
+Instead of typing tokens by hand, click the **"🔍 ノードの値を挿入… / Insert token"** button on the node to open a modal.
+
+**Node value:**
 
 1. Pick the source node from the **node-title dropdown** (only other nodes that have widgets are listed; the node itself is excluded).
 2. Its **widget names and current values** are listed — click a row to select it (double-click inserts immediately and keeps the modal open).
-3. Click **Insert** to drop the `%Title.widget%` token at the caret position in `template`.
 
-The list is only expanded for the one node you pick, so it stays fast even with many nodes in the graph. Works in both Classic and Nodes 2.0 modes.
+**Date format:**
+
+- A list of `%date:…%` samples (`yyyy-MM-dd`, `yyyy-MM-dd_hh-mm-ss`, etc.) with live previews sits at the bottom of the modal — click one to select it.
+
+Either way, with a row selected click **Insert** to drop the token at the caret position in `template` (node value and date are mutually exclusive — one at a time). Date formats are available even when there are no other nodes to reference.
+
+The node widget list is only expanded for the one node you pick, so it stays fast even with many nodes in the graph. Works in both Classic and Nodes 2.0 modes.
 
 ### How it works & caveats
 

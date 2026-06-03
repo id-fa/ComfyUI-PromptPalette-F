@@ -19,15 +19,25 @@ import { api } from "../../scripts/api.js";
 // Token resolution (queue time)
 // ---------------------------------------------------------------------------
 
-// Replace every %Title.widget% token in `template` with the current value of
-// the matching widget. The part before the FIRST dot is the node title; the
-// rest is the widget name (titles rarely contain dots — SaveImage splits the
-// same way). Unresolvable tokens are left untouched so the user can spot typos.
+// Replace tokens in `template`:
+//   %date:FORMAT%  — current date/time formatted like SaveImage's filename_prefix
+//   %date%         — shorthand for %date:yyyy-MM-dd%
+//   %Title.widget% — current value of the named widget on the node titled Title
+// The %Title.widget% part is split on the FIRST dot (titles rarely contain
+// dots — SaveImage splits the same way). Unresolvable tokens are left untouched
+// so the user can spot typos.
 function resolveTemplate(template) {
   if (typeof template !== "string" || template.indexOf("%") === -1) {
     return template;
   }
   return template.replace(/%([^%]+)%/g, (match, inner) => {
+    // Date token: %date% or %date:FORMAT% (mirrors SaveImage)
+    if (inner === "date" || inner.startsWith("date:")) {
+      const fmt = inner === "date" ? "yyyy-MM-dd" : inner.slice("date:".length);
+      return formatDate(fmt, new Date());
+    }
+
+    // Node reference: %Title.widget%
     const dot = inner.indexOf(".");
     if (dot === -1) {
       return match; // no ".property" → not a node reference, leave as-is
@@ -40,6 +50,49 @@ function resolveTemplate(template) {
     }
     return String(value);
   });
+}
+
+// Format a Date using SaveImage-style tokens. Supported (case-sensitive):
+//   yyyy (4-digit year), yy (2-digit year),
+//   MM/M (month), dd/d (day), hh/h (24h hour), mm/m (minute), ss/s (second).
+// Any other character is emitted literally. Tokens are matched longest-first
+// via a left-to-right scan so e.g. `yyyy` wins over `yy` and `MM` over `M`,
+// and already-substituted digits are never re-matched.
+function formatDate(format, dt) {
+  const z2 = (n) => String(n).padStart(2, "0");
+  const map = {
+    yyyy: String(dt.getFullYear()),
+    yy: String(dt.getFullYear()).slice(-2),
+    MM: z2(dt.getMonth() + 1),
+    M: String(dt.getMonth() + 1),
+    dd: z2(dt.getDate()),
+    d: String(dt.getDate()),
+    hh: z2(dt.getHours()),
+    h: String(dt.getHours()),
+    mm: z2(dt.getMinutes()),
+    m: String(dt.getMinutes()),
+    ss: z2(dt.getSeconds()),
+    s: String(dt.getSeconds()),
+  };
+  const keys = Object.keys(map).sort((a, b) => b.length - a.length);
+  let result = "";
+  let i = 0;
+  while (i < format.length) {
+    let matched = false;
+    for (const key of keys) {
+      if (format.startsWith(key, i)) {
+        result += map[key];
+        i += key.length;
+        matched = true;
+        break;
+      }
+    }
+    if (!matched) {
+      result += format[i];
+      i += 1;
+    }
+  }
+  return result;
 }
 
 // Find the first node whose title matches `title` and return the value of its
@@ -63,6 +116,18 @@ function lookupWidgetValue(title, prop) {
 // ---------------------------------------------------------------------------
 // Token picker modal
 // ---------------------------------------------------------------------------
+
+// Sample %date:FORMAT% presets offered in the picker. The live preview next to
+// each is produced by formatDate() at modal-open time.
+const DATE_SAMPLES = [
+  "yyyy-MM-dd",
+  "yyyy-MM-dd_hh-mm-ss",
+  "yyyyMMdd",
+  "yyyyMMdd_hhmmss",
+  "yyyy/MM/dd",
+  "yyyy-MM",
+  "hh-mm-ss",
+];
 
 const MODAL_CSS = `
 .nvt-modal-backdrop {
@@ -100,10 +165,11 @@ const MODAL_CSS = `
   border: 1px solid var(--border-color, #444); border-radius: 4px;
   padding: 5px 6px;
 }
+.nvt-section-label { font-size: 12px; opacity: 0.7; margin: 2px 0 -4px; }
 .nvt-prop-list {
   border: 1px solid var(--border-color, #444); border-radius: 4px;
   background: var(--comfy-input-bg, #111);
-  max-height: 320px; overflow-y: auto;
+  max-height: 230px; overflow-y: auto;
 }
 .nvt-prop-row {
   display: flex; gap: 8px; align-items: baseline;
@@ -302,7 +368,7 @@ function openTokenPicker(node) {
   const header = document.createElement("div");
   header.className = "nvt-modal-header";
   const hb = document.createElement("b");
-  hb.textContent = "ノードの値を挿入 / Insert node value";
+  hb.textContent = "値・日付トークンを挿入 / Insert token";
   const closeBtn = document.createElement("button");
   closeBtn.className = "nvt-modal-close";
   closeBtn.textContent = "✕";
@@ -322,50 +388,7 @@ function openTokenPicker(node) {
   footer.className = "nvt-modal-footer";
   panel.appendChild(footer);
 
-  if (titles.length === 0) {
-    const empty = document.createElement("div");
-    empty.className = "nvt-modal-empty";
-    empty.textContent =
-      "参照できるノードがありません（ウィジェットを持つ他のノードを追加してください）。";
-    body.appendChild(empty);
-    const ok = document.createElement("button");
-    ok.className = "nvt-btn";
-    ok.textContent = "閉じる";
-    ok.style.marginLeft = "auto";
-    ok.addEventListener("click", closeTokenPicker);
-    footer.appendChild(ok);
-    mountModal(backdrop, panel);
-    return;
-  }
-
-  // Node title dropdown
-  const titleRow = document.createElement("div");
-  titleRow.className = "nvt-modal-row";
-  const titleLabel = document.createElement("label");
-  titleLabel.textContent = "ノードタイトル";
-  const titleSelect = document.createElement("select");
-  titleSelect.className = "nvt-modal-select";
-  // Blank first option so nothing is pre-selected until the user picks a node.
-  const placeholder = document.createElement("option");
-  placeholder.value = "";
-  placeholder.textContent = "";
-  titleSelect.appendChild(placeholder);
-  for (const t of titles) {
-    const opt = document.createElement("option");
-    opt.value = t;
-    opt.textContent = t;
-    titleSelect.appendChild(opt);
-  }
-  titleRow.appendChild(titleLabel);
-  titleRow.appendChild(titleSelect);
-  body.appendChild(titleRow);
-
-  // Property list
-  const propList = document.createElement("div");
-  propList.className = "nvt-prop-list";
-  body.appendChild(propList);
-
-  // Footer: token preview + insert
+  // Footer: token preview + insert (built first so selection handlers can use it)
   const preview = document.createElement("span");
   preview.className = "nvt-token-preview";
   const insertBtn = document.createElement("button");
@@ -380,88 +403,149 @@ function openTokenPicker(node) {
   footer.appendChild(insertBtn);
   cancelBtn.addEventListener("click", closeTokenPicker);
 
-  // Selection state
-  const state = { title: null, prop: null };
+  // Shared selection state: the single currently-chosen token string (or null).
+  // Both the node-value rows and the date-format rows feed this.
+  const state = { token: null };
+
+  const isDateToken = (t) => t === "%date%" || t.startsWith("%date:");
 
   function updatePreview() {
-    if (state.title && state.prop) {
-      const tok = `%${state.title}.${state.prop}%`;
-      preview.textContent = tok;
+    if (state.token) {
+      preview.textContent = state.token;
       insertBtn.disabled = false;
     } else {
-      preview.textContent = "プロパティを選択してください";
+      preview.textContent = "挿入するトークンを選択してください";
       insertBtn.disabled = true;
     }
   }
 
-  function renderProps(title) {
-    state.title = title || null;
-    state.prop = null;
-    propList.innerHTML = "";
-    if (!title) {
-      const hint = document.createElement("div");
-      hint.className = "nvt-modal-empty";
-      hint.textContent = "ノードタイトルを選択してください。";
-      propList.appendChild(hint);
-      updatePreview();
-      return;
-    }
-    const targetNode = titleMap.get(title);
-    const widgets = (targetNode?.widgets || []).filter((w) => w && w.name);
-    if (widgets.length === 0) {
-      const empty = document.createElement("div");
-      empty.className = "nvt-modal-empty";
-      empty.textContent = "このノードには参照できるウィジェットがありません。";
-      propList.appendChild(empty);
-      updatePreview();
-      return;
-    }
-    widgets.forEach((w, idx) => {
-      const row = document.createElement("div");
-      row.className = "nvt-prop-row";
-      const name = document.createElement("span");
-      name.className = "nvt-prop-name";
-      name.textContent = w.name;
-      const val = document.createElement("span");
-      val.className = "nvt-prop-val";
-      val.textContent = formatValue(w.value);
-      val.title = formatValue(w.value);
-      row.appendChild(name);
-      row.appendChild(val);
-
-      const select = () => {
-        propList
-          .querySelectorAll(".nvt-prop-row.selected")
-          .forEach((el) => el.classList.remove("selected"));
-        row.classList.add("selected");
-        state.prop = w.name;
-        updatePreview();
-      };
-      row.addEventListener("click", select);
-      // Double-click = select + insert immediately (keeps modal open for more).
-      row.addEventListener("dblclick", () => {
-        select();
-        doInsert(false);
-      });
-      propList.appendChild(row);
-
-      // Pre-select the first property for convenience.
-      if (idx === 0) select();
-    });
+  // Mark `row` as selected, clearing any previous highlight across BOTH lists
+  // (node + date are mutually exclusive — one token at a time).
+  function selectRow(row, token) {
+    panel
+      .querySelectorAll(".nvt-prop-row.selected")
+      .forEach((el) => el.classList.remove("selected"));
+    if (row) row.classList.add("selected");
+    state.token = token;
+    updatePreview();
   }
 
   function doInsert(close) {
-    if (!state.title || !state.prop) return;
-    insertToken(node, `%${state.title}.${state.prop}%`);
+    if (!state.token) return;
+    insertToken(node, state.token);
     if (close) closeTokenPicker();
   }
 
-  insertBtn.addEventListener("click", () => doInsert(true));
-  titleSelect.addEventListener("change", () => renderProps(titleSelect.value));
+  function makeRow(list, nameText, valText, token) {
+    const row = document.createElement("div");
+    row.className = "nvt-prop-row";
+    const name = document.createElement("span");
+    name.className = "nvt-prop-name";
+    name.textContent = nameText;
+    const val = document.createElement("span");
+    val.className = "nvt-prop-val";
+    val.textContent = valText;
+    val.title = valText;
+    row.appendChild(name);
+    row.appendChild(val);
+    row.addEventListener("click", () => selectRow(row, token));
+    // Double-click = select + insert immediately (keeps the modal open).
+    row.addEventListener("dblclick", () => {
+      selectRow(row, token);
+      doInsert(false);
+    });
+    list.appendChild(row);
+    return row;
+  }
 
-  // Start with the blank option selected (no node pre-chosen).
-  titleSelect.value = "";
-  renderProps("");
+  // ---- Node value section ----
+  const nodeLabel = document.createElement("div");
+  nodeLabel.className = "nvt-section-label";
+  nodeLabel.textContent = "ノードの値";
+  body.appendChild(nodeLabel);
+
+  if (titles.length === 0) {
+    const hint = document.createElement("div");
+    hint.className = "nvt-modal-empty";
+    hint.textContent =
+      "参照できるノードがありません（ウィジェットを持つ他のノードを追加してください）。";
+    body.appendChild(hint);
+  } else {
+    const titleRow = document.createElement("div");
+    titleRow.className = "nvt-modal-row";
+    const titleLabel = document.createElement("label");
+    titleLabel.textContent = "ノードタイトル";
+    const titleSelect = document.createElement("select");
+    titleSelect.className = "nvt-modal-select";
+    // Blank first option so nothing is pre-selected until the user picks a node.
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = "";
+    titleSelect.appendChild(placeholder);
+    for (const t of titles) {
+      const opt = document.createElement("option");
+      opt.value = t;
+      opt.textContent = t;
+      titleSelect.appendChild(opt);
+    }
+    titleRow.appendChild(titleLabel);
+    titleRow.appendChild(titleSelect);
+    body.appendChild(titleRow);
+
+    const propList = document.createElement("div");
+    propList.className = "nvt-prop-list";
+    body.appendChild(propList);
+
+    function renderProps(title) {
+      propList.innerHTML = "";
+      // Switching node clears a stale node-token selection (its row is gone).
+      // A date-token selection is left intact.
+      if (state.token && !isDateToken(state.token)) selectRow(null, null);
+      if (!title) {
+        const hint = document.createElement("div");
+        hint.className = "nvt-modal-empty";
+        hint.textContent = "ノードタイトルを選択してください。";
+        propList.appendChild(hint);
+        return;
+      }
+      const targetNode = titleMap.get(title);
+      const widgets = (targetNode?.widgets || []).filter((w) => w && w.name);
+      if (widgets.length === 0) {
+        const hint = document.createElement("div");
+        hint.className = "nvt-modal-empty";
+        hint.textContent = "このノードには参照できるウィジェットがありません。";
+        propList.appendChild(hint);
+        return;
+      }
+      widgets.forEach((w, idx) => {
+        const valText = formatValue(w.value);
+        const row = makeRow(propList, w.name, valText, `%${title}.${w.name}%`);
+        // Pre-select the first property for convenience.
+        if (idx === 0) selectRow(row, `%${title}.${w.name}%`);
+      });
+    }
+
+    titleSelect.addEventListener("change", () => renderProps(titleSelect.value));
+    titleSelect.value = "";
+    renderProps("");
+  }
+
+  // ---- Date format section ----
+  const dateLabel = document.createElement("div");
+  dateLabel.className = "nvt-section-label";
+  dateLabel.textContent = "日付フォーマット（%date:…%）";
+  body.appendChild(dateLabel);
+
+  const dateList = document.createElement("div");
+  dateList.className = "nvt-prop-list";
+  const now = new Date();
+  for (const fmt of DATE_SAMPLES) {
+    const token = `%date:${fmt}%`;
+    makeRow(dateList, token, "→ " + formatDate(fmt, now), token);
+  }
+  body.appendChild(dateList);
+
+  insertBtn.addEventListener("click", () => doInsert(true));
   updatePreview();
 
   mountModal(backdrop, panel);
