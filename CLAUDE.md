@@ -11,6 +11,7 @@ Bundled nodes:
 - **SimpleMultiConcatText** (`Simple Multi Concat Text`) — UI-less, joins up to 5 text inputs with a separator
 - **GetFirstWord** (`Get First Word`) — UI-less, returns the text before the first occurrence of a stop word (literal or regex)
 - **GetFirstWordList** (`Get First Word (List)`) — UI-less, applies Get First Word to every item of a LIST input, outputs both joined STRING and a LIST
+- **PromptTabs** (`Prompt Tabs`) — notepad-style node holding any number of named prompt tabs; outputs the active tab's text (STRING) and its name (STRING). Has its own frontend (`web/prompt_tabs.js`). Ported from ComfyUI-Lenient-Switch on 2026-06-03
 
 ## Architecture
 
@@ -114,7 +115,21 @@ The project follows ComfyUI's custom node structure with V3 API compliance and d
    - **V3 schema caveat**: V3 has no first-class LIST input/output type, so the V3 `define_schema` declares both as `io.String.*`. The V1 `INPUT_TYPES` and `RETURN_TYPES`/`RETURN_NAMES` carry the actual `"LIST"` type, and ComfyUI passes a real Python list at execute time regardless. Same pattern as `PromptPalette_F.selected_list`
    - **No `add_newline` / `separator_newline`**: kept minimal — if newline-joining is needed, the user can chain through `SimpleMultiConcatText` with a single wired input, or set `text_separator` to `"\n"` directly
 
-5. **Web Extension - Adaptive Dual Mode** (`web/index.js`):
+5. **PromptTabs Node** (`nodes.py` + `web/prompt_tabs.js`):
+   - **Notepad-style multi-tab node**: holds an unbounded number of named prompt tabs in one box; outputs the active tab's text and name
+   - **Inputs**: `text` (STRING, multiline) — editor for the active tab; `tabs_data` (STRING) — hidden JSON store managed entirely by the frontend, holding `{"tabs": [{"name", "text"}], "active": int}`
+   - **Outputs**: `text` (STRING) — the active editor's current contents; `label` (STRING) — the active tab's name (parsed out of `tabs_data` by `_active_label`)
+   - **Thin Python by design**: all tab state lives in the frontend. `text` output never depends on Python parsing — the node degrades to a plain multiline box (empty label) if the JS never loads. `_active_label` only reads the name the frontend already chose; do NOT move tab-selection logic into Python. Malformed/missing JSON → empty label
+   - **V3/V1 hybrid**: same conditional pattern as the other nodes — V3 `define_schema` with `io.String.Input`/`io.String.Output` when V3 available, V1 `INPUT_TYPES` + `RETURN_TYPES`/`RETURN_NAMES` always defined. `execute()` returns `(text, label)` / `io.NodeOutput(text, label)`
+   - **Frontend** (`web/prompt_tabs.js`): separate extension `idfa.PromptTabs` (acts only on `nodeData.name === "PromptTabs"`, fully independent of the `PromptPalette_F` extension in `index.js`)
+     - **`tabs_data` is the master store; `text` is the active-tab editor.** Kept in sync by `saveEditorIntoActive()` (editor→store) and `loadActiveIntoEditor()` (store→editor) around every switch/add/delete. `loadActiveIntoEditor` sets `textWidget.value` programmatically, which does NOT fire the `input` listener — prevents a feedback loop
+     - **Live sync** via an `input` listener on the editor textarea (`findTextArea`) flushes every keystroke into the store (the canvas tab bar approach didn't stay live under the Vue/Nodes 2.0 renderer). `dataWidget.serializeValue` is a belt-and-suspenders flush at serialize/queue time. Does NOT patch `api.queuePrompt`
+     - **Tab bar is a DOM widget** (`addDOMWidget`), not canvas — real HTML buttons stay interactive under both frontends; CSS `flex-wrap` gives multi-row wrapping. Outer `bar` wraps an `inner` flex row whose natural `offsetHeight` is reported via `tabWidget.computeSize`; a `ResizeObserver` on `inner` nudges a redraw on wrap changes. Never height-force `inner` (would ratchet `offsetHeight`). `serialize: false` keeps the bar out of the saved graph; spliced directly above the `text` widget
+     - **`hideWidget` hides `tabs_data`** by zeroing `computeSize` (`[0,-4]`), `type="hidden"`, `hidden=true`. Keep `tabs_data` single-line (no `multiline`) so it has no DOM textarea to fight with
+     - **`onConfigure` re-runs `reload()`** (ComfyUI restores widget values after `onNodeCreated`). `reload()` parses `tabs_data` or seeds one tab from current editor text — never produces zero tabs (delete keeps a floor of one)
+     - Interactions: single-click switches, double-click renames via `prompt()`, per-tab `×` deletes after a `confirm()`, `+` adds
+
+6. **Web Extension - Adaptive Dual Mode** (`web/index.js`):
    - **Single Unified Registration**: Single extension "PromptPalette_F" that adapts to rendering mode
    - **Adaptive Mode Detection via Callbacks**:
      - `onNodeCreated`: Sets up both Classic and Nodes 2.0 features initially

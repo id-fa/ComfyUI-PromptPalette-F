@@ -1,3 +1,4 @@
+import json
 import os
 import re
 
@@ -560,6 +561,98 @@ class GetFirstWordList(BaseNodeClass):
             return (text_out, results)
 
 
+class PromptTabs(BaseNodeClass):
+    """Notepad-style node holding any number of named prompt tabs.
+
+    The visible ``text`` widget is the editor for the active tab; ``tabs_data``
+    is a hidden JSON store managed entirely by ``web/prompt_tabs.js`` holding
+    ``{"tabs": [{"name", "text"}], "active": int}``. Python emits whatever the
+    active editor currently holds plus the active tab's name, so the node
+    degrades to a plain text box (with an empty label) if the frontend
+    extension fails to load. Do not move tab-selection logic into Python —
+    ``_active_label`` only reads the name the frontend already chose.
+    """
+
+    if V3_AVAILABLE:
+        @classmethod
+        def define_schema(cls):
+            return io.Schema(
+                node_id="PromptTabs",
+                display_name="Prompt Tabs",
+                category="utils",
+                inputs=[
+                    io.String.Input(
+                        "text",
+                        multiline=True,
+                        default="",
+                        tooltip="Text of the currently selected tab.",
+                    ),
+                    io.String.Input(
+                        "tabs_data",
+                        default="",
+                        tooltip="Internal tab storage (managed by the UI).",
+                    ),
+                ],
+                outputs=[
+                    io.String.Output(display_name="text"),
+                    io.String.Output(display_name="label"),
+                ],
+            )
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                # Editor for the active tab. The frontend swaps its contents
+                # when you switch tabs; its value at run time IS the output.
+                "text": ("STRING", {
+                    "multiline": True,
+                    "default": "",
+                    "tooltip": "Text of the currently selected tab.",
+                }),
+                # Master store for every tab. Hidden and driven entirely by
+                # web/prompt_tabs.js. Holds JSON: {"tabs": [{"name", "text"}],
+                # "active": int}. Not meant to be edited by hand.
+                "tabs_data": ("STRING", {
+                    "default": "",
+                    "tooltip": "Internal tab storage (managed by the UI).",
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("text", "label")
+    FUNCTION = "execute"
+    CATEGORY = "utils"
+
+    @staticmethod
+    def _active_label(tabs_data):
+        # Pull the active tab's name out of the JSON the frontend maintains.
+        # Any malformed/missing data degrades to an empty label.
+        try:
+            data = json.loads(tabs_data) if tabs_data else None
+        except (ValueError, TypeError):
+            return ""
+        if not isinstance(data, dict):
+            return ""
+        tabs = data.get("tabs")
+        active = data.get("active", 0)
+        if not isinstance(tabs, list) or not isinstance(active, int):
+            return ""
+        if not (0 <= active < len(tabs)):
+            return ""
+        name = tabs[active].get("name") if isinstance(tabs[active], dict) else None
+        return name if isinstance(name, str) else ""
+
+    @classmethod
+    def execute(cls, text="", tabs_data=""):
+        label = cls._active_label(tabs_data)
+        if V3_AVAILABLE:
+            return io.NodeOutput(text, label)
+        else:
+            return (text, label)
+
+
 # V3 Extension entrypoint (only if V3 is available)
 if V3_AVAILABLE:
     class PromptPaletteExtension(ComfyExtension):
@@ -568,7 +661,7 @@ if V3_AVAILABLE:
             return os.path.join(os.path.dirname(os.path.realpath(__file__)), "web")
 
         async def get_node_list(self):
-            return [PromptPalette_F, SimpleMultiConcatText, GetFirstWord, GetFirstWordList]
+            return [PromptPalette_F, SimpleMultiConcatText, GetFirstWord, GetFirstWordList, PromptTabs]
 
     async def comfy_entrypoint():
         return PromptPaletteExtension()
@@ -580,11 +673,13 @@ NODE_CLASS_MAPPINGS = {
     "SimpleMultiConcatText": SimpleMultiConcatText,
     "GetFirstWord": GetFirstWord,
     "GetFirstWordList": GetFirstWordList,
+    "PromptTabs": PromptTabs,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "PromptPalette_F": "PromptPalette-F",
     "SimpleMultiConcatText": "Simple Multi Concat Text",
     "GetFirstWord": "Get First Word",
     "GetFirstWordList": "Get First Word (List)",
+    "PromptTabs": "Prompt Tabs",
 }
 WEB_DIRECTORY = os.path.join(os.path.dirname(os.path.realpath(__file__)), "web")
