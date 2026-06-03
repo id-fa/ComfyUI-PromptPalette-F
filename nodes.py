@@ -653,6 +653,77 @@ class PromptTabs(BaseNodeClass):
             return (text, label)
 
 
+class NodeValueTemplate(BaseNodeClass):
+    """Output a string with %NodeTitle.widget% tokens resolved from other nodes.
+
+    Mirrors ComfyUI's SaveImage ``filename_prefix`` substitution
+    (``%KSampler.seed%`` style): the visible ``template`` widget keeps the raw
+    ``%Title.widget%`` text, while the frontend (``web/node_value_template.js``)
+    resolves every token against the current graph at queue time and injects
+    the resolved string into the prompt before it reaches the backend.
+
+    Resolution MUST happen in the frontend because node titles and live widget
+    values only exist there (the backend prompt carries node ids + input values,
+    not titles). Python therefore only passes the ``template`` through; if the
+    frontend extension fails to load, the node degrades to emitting the raw
+    template (tokens left intact) instead of crashing.
+    """
+
+    if V3_AVAILABLE:
+        @classmethod
+        def define_schema(cls):
+            return io.Schema(
+                node_id="NodeValueTemplate",
+                display_name="Node Value Template",
+                category="utils",
+                inputs=[
+                    io.String.Input(
+                        "template",
+                        default="",
+                        multiline=True,
+                    ),
+                ],
+                outputs=[
+                    io.String.Output(display_name="text"),
+                ],
+            )
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "template": ("STRING", {
+                    "default": "",
+                    "multiline": True,
+                    "tooltip": (
+                        "Text with %NodeTitle.widget% tokens. Each token is "
+                        "replaced by the current value of the named widget on "
+                        "the node whose title matches NodeTitle, like "
+                        "SaveImage's filename_prefix. Resolved in the frontend "
+                        "at queue time; unresolvable tokens are left as-is."
+                    ),
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("text",)
+    FUNCTION = "execute"
+    CATEGORY = "utils"
+
+    @classmethod
+    def execute(cls, template=""):
+        # The frontend has already replaced %Title.widget% tokens in the value
+        # that reaches us, so this is a straight pass-through. Coerce non-string
+        # values defensively (a wrong-typed widget shouldn't crash the node).
+        if not isinstance(template, str):
+            template = ""
+        if V3_AVAILABLE:
+            return io.NodeOutput(template)
+        else:
+            return (template,)
+
+
 # V3 Extension entrypoint (only if V3 is available)
 if V3_AVAILABLE:
     class PromptPaletteExtension(ComfyExtension):
@@ -661,7 +732,7 @@ if V3_AVAILABLE:
             return os.path.join(os.path.dirname(os.path.realpath(__file__)), "web")
 
         async def get_node_list(self):
-            return [PromptPalette_F, SimpleMultiConcatText, GetFirstWord, GetFirstWordList, PromptTabs]
+            return [PromptPalette_F, SimpleMultiConcatText, GetFirstWord, GetFirstWordList, PromptTabs, NodeValueTemplate]
 
     async def comfy_entrypoint():
         return PromptPaletteExtension()
@@ -674,6 +745,7 @@ NODE_CLASS_MAPPINGS = {
     "GetFirstWord": GetFirstWord,
     "GetFirstWordList": GetFirstWordList,
     "PromptTabs": PromptTabs,
+    "NodeValueTemplate": NodeValueTemplate,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "PromptPalette_F": "PromptPalette-F",
@@ -681,5 +753,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "GetFirstWord": "Get First Word",
     "GetFirstWordList": "Get First Word (List)",
     "PromptTabs": "Prompt Tabs",
+    "NodeValueTemplate": "Node Value Template",
 }
 WEB_DIRECTORY = os.path.join(os.path.dirname(os.path.realpath(__file__)), "web")

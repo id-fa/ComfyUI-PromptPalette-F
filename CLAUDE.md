@@ -12,6 +12,7 @@ Bundled nodes:
 - **GetFirstWord** (`Get First Word`) — UI-less, returns the text before the first occurrence of a stop word (literal or regex)
 - **GetFirstWordList** (`Get First Word (List)`) — UI-less, applies Get First Word to every item of a LIST input, outputs both joined STRING and a LIST
 - **PromptTabs** (`Prompt Tabs`) — notepad-style node holding any number of named prompt tabs; outputs the active tab's text (STRING) and its name (STRING). Has its own frontend (`web/prompt_tabs.js`). Ported from ComfyUI-Lenient-Switch on 2026-06-03
+- **NodeValueTemplate** (`Node Value Template`) — string node that resolves `%NodeTitle.widget%` tokens against other nodes' widget values, mirroring `SaveImage`'s `filename_prefix` substitution. Token resolution happens in the frontend (`web/node_value_template.js`) via an `api.queuePrompt` patch. Added 2026-06-03
 
 ## Architecture
 
@@ -129,7 +130,26 @@ The project follows ComfyUI's custom node structure with V3 API compliance and d
      - **`onConfigure` re-runs `reload()`** (ComfyUI restores widget values after `onNodeCreated`). `reload()` parses `tabs_data` or seeds one tab from current editor text — never produces zero tabs (delete keeps a floor of one)
      - Interactions: single-click switches, double-click renames via `prompt()`, per-tab `×` deletes after a `confirm()`, `+` adds
 
-6. **Web Extension - Adaptive Dual Mode** (`web/index.js`):
+6. **NodeValueTemplate Node** (`nodes.py` + `web/node_value_template.js`):
+   - **`%NodeTitle.widget%` token resolver**: outputs a string where each `%Title.widget%` token is replaced by the current value of the matching widget on the node whose title matches `Title`. Mirrors `SaveImage`'s `filename_prefix` substitution (`%KSampler.seed%`)
+   - **Input**: `template` (STRING, multiline) — the text with `%Title.widget%` tokens
+   - **Output**: `text` (STRING) — the resolved string
+   - **Resolution happens in the frontend, NOT Python.** Node titles and live widget values only exist in the frontend graph (the backend prompt carries node ids + input values, not titles). So `execute()` is a pure pass-through (defensive `isinstance(template, str)` coercion only); the frontend resolves tokens and injects the result before the prompt is sent. Without the JS, the node degrades to emitting the raw template (tokens intact)
+   - **V3/V1 hybrid**: same conditional pattern as the other nodes
+   - **Frontend** (`web/node_value_template.js`): separate extension `idfa.NodeValueTemplate`, fully independent of `index.js` and `prompt_tabs.js`
+     - **`api.queuePrompt` patch** (in `setup()`): for every `class_type === "NodeValueTemplate"` node in the prompt `output`, reads the live `template` widget value, runs `resolveTemplate()`, and writes the resolved string into `nodeData.inputs.template`. Same pattern as `index.js`'s `preview_override` injection — the widget keeps the raw `%...%` text, the prompt carries the resolved value. **Patches chain**: `index.js` patches `api.queuePrompt` too; each captures the previous reference and calls through, so both coexist as long as each only touches its own node type
+     - **`resolveTemplate(template)`**: `String.replace(/%([^%]+)%/g, ...)`. Splits the token on the FIRST `.` → `title` + `prop` (titles rarely contain dots; same as SaveImage). Looks up via `lookupWidgetValue()`. Unresolvable tokens (node/widget not found, or value `undefined`/`null`) are LEFT AS-IS (`%...%`) so typos are visible
+     - **`lookupWidgetValue(title, prop)`**: scans `app.graph._nodes`, matches `n.title || n.type` against `title` (LiteGraph falls back `title` → type display name), returns the first matching node's `widgets.find(w => w.name === prop).value`
+     - **Caveats**: widget values only (no output/meta); first-match wins on duplicate titles; titles with `.` unsupported (first-dot split)
+   - **Token picker modal** (`web/node_value_template.js`): a `🔍 ノードの値を挿入…` button (added via `addDOMWidget` so it works in both renderers, like the prompt_tabs tab bar) opens a modal helper for building tokens without typing
+     - **`addDOMWidget` type MUST be a custom string, NOT `"button"`**: a `"button"` type makes the Nodes 2.0 (Vue) renderer treat it as a known widget and draw a labeled field from the widget NAME (`nvt_pick`) instead of mounting the element — the row looks inert and clicks do nothing. Use a custom type (`"nvt_pick_btn"`, mirroring prompt_tabs' `"prompt_tabs_bar"`) + `hideOnZoom: false`, and report `[width, h]` from `computeSize` (a flex wrapper + `align-items:center` keeps the Classic-mode label from sitting slightly below the button). This was the fix for "label offset in Classic / unresponsive nvt_pick field in Nodes 2.0"
+     - **Flow** (confirmed design): node-title `<select>` → scrollable list of that node's widget names + current values (click a row to select, double-click inserts immediately and keeps the modal open) → `挿入` button inserts `%Title.widget%` at the caret. Avoids dumping every node's widgets at once (which would be heavy with many nodes) — only the chosen node's widgets are expanded
+     - **`collectTitleMap(selfNode)`**: title → FIRST node with that title (matching the resolver's first-match), excluding `self` and nodes with no named widgets. Dropdown lists distinct titles; the property list shows the first matching node's widgets (exactly what the token will resolve to)
+     - **Caret insertion**: `ensureCaretTracker(node)` attaches listeners (`keyup`/`click`/`select`/`input`/`focus`/`blur`) to the multiline `template` textarea (`widget.inputEl || widget.element`) and records `node._nvtCaret`. The picker button blurs the textarea, so the recorded caret (not a live read) is what `insertToken()` uses. After insert it sets `textarea.value`, dispatches an `input` event (so ComfyUI's own listener keeps `widget.value` authoritative), restores the caret past the inserted token, and calls `widget.callback`
+     - **Modal** is a plain `position: fixed` backdrop + panel (theme-variable CSS injected once via `injectModalCSS`); Esc and click-outside close it. Independent of `index.js`'s overlays
+     - **Caveat**: if the textarea can't be found (unusual), `insertToken` falls back to appending at the end of `widget.value`
+
+7. **Web Extension - Adaptive Dual Mode** (`web/index.js`):
    - **Single Unified Registration**: Single extension "PromptPalette_F" that adapts to rendering mode
    - **Adaptive Mode Detection via Callbacks**:
      - `onNodeCreated`: Sets up both Classic and Nodes 2.0 features initially
@@ -511,6 +531,14 @@ This project includes `pyproject.toml` for ComfyUI registry publication followin
 - **Repository**: https://github.com/id-fa/ComfyUI-PromptPalette-F
 
 ## Development Status
+
+### Recent Changes (June 3, 2026)
+- ✅ **`NodeValueTemplate` node added** (`nodes.py` + new `web/node_value_template.js`): resolves `%NodeTitle.widget%` tokens against other nodes' widget values, mirroring `SaveImage`'s `filename_prefix` substitution
+  - Backend: thin pass-through `execute()` (defensive `isinstance(template, str)` coercion only) — resolution can't happen in Python because node titles/live widget values only exist in the frontend graph. V3/V1 hybrid like the other nodes. Registered in `get_node_list()` (V3) + `NODE_CLASS_MAPPINGS` / `NODE_DISPLAY_NAME_MAPPINGS` (V1)
+  - Frontend (`web/node_value_template.js`): separate extension `idfa.NodeValueTemplate`. `setup()` patches `api.queuePrompt` — for each `class_type === "NodeValueTemplate"` node it reads the live `template` widget, runs `resolveTemplate()`, injects the resolved string into `nodeData.inputs.template`. Same pattern as `index.js`'s `preview_override` injection; patches chain (each captures the previous `api.queuePrompt` and calls through)
+  - `resolveTemplate()`: regex `/%([^%]+)%/g`, splits each token on the FIRST `.` → title + widget name; `lookupWidgetValue()` matches `n.title || n.type` in `app.graph._nodes`, first match wins. Unresolvable tokens left as `%...%` (visible typos). Widget values only (no output/meta); titles with `.` unsupported
+  - **Token picker modal** (same-day follow-up): a `🔍 ノードの値を挿入…` DOM-widget button (`addDOMWidget`, works in both renderers) opens a modal — pick a node title from a `<select>`, see that node's widget names + current values in a scrollable list, click a row, and `挿入` inserts `%Title.widget%` at the caret in `template`. `ensureCaretTracker()` records `node._nvtCaret` from textarea listeners (the button blurs the textarea, so the recorded caret is used, not a live read); `insertToken()` writes `textarea.value`, dispatches `input`, restores caret. Design: dropdown-per-node (not a flat all-widgets search) so it stays fast with many nodes; nodes without widgets and the node itself are excluded; duplicate titles → first node's widgets shown (matches resolver)
+  - Docs: README (JA + EN) and CLAUDE.md updated
 
 ### Recent Changes (May 30, 2026)
 - ✅ **Three UI-less utility nodes added** (`nodes.py`): no frontend code, no `web/index.js` changes
