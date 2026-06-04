@@ -27,7 +27,7 @@ class PromptPalette_F(BaseNodeClass):
             return io.Schema(
                 node_id="PromptPalette_F",
                 display_name="PromptPalette-F",
-                category="utils",
+                category="PromptPalette-F",
                 inputs=[
                     io.String.Input(
                         "text",
@@ -124,7 +124,7 @@ class PromptPalette_F(BaseNodeClass):
     RETURN_TYPES = ("STRING", "STRING", "LIST")
     RETURN_NAMES = ("text", "selected_text", "selected_list")
     FUNCTION = "execute"
-    CATEGORY = "utils"
+    CATEGORY = "PromptPalette-F"
 
     @staticmethod
     def remove_group_tags_with_escape(line):
@@ -267,7 +267,7 @@ class SimpleMultiConcatText(BaseNodeClass):
             return io.Schema(
                 node_id="SimpleMultiConcatText",
                 display_name="Simple Multi Concat Text",
-                category="utils",
+                category="PromptPalette-F",
                 inputs=[
                     io.String.Input("text1", optional=True, default=""),
                     io.String.Input("text2", optional=True, default=""),
@@ -311,7 +311,7 @@ class SimpleMultiConcatText(BaseNodeClass):
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("text",)
     FUNCTION = "execute"
-    CATEGORY = "utils"
+    CATEGORY = "PromptPalette-F"
 
     @classmethod
     def execute(cls, text1="", text2="", text3="", text4="", text5="",
@@ -350,7 +350,7 @@ class GetFirstWord(BaseNodeClass):
             return io.Schema(
                 node_id="GetFirstWord",
                 display_name="Get First Word",
-                category="utils",
+                category="PromptPalette-F",
                 inputs=[
                     io.String.Input("text", optional=True, default=""),
                     io.String.Input("stop_word", default=","),
@@ -396,7 +396,7 @@ class GetFirstWord(BaseNodeClass):
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("text",)
     FUNCTION = "execute"
-    CATEGORY = "utils"
+    CATEGORY = "PromptPalette-F"
 
     @classmethod
     def process_one(cls, text, stop_word, use_regex, trim,
@@ -467,7 +467,7 @@ class GetFirstWordList(BaseNodeClass):
             return io.Schema(
                 node_id="GetFirstWordList",
                 display_name="Get First Word (List)",
-                category="utils",
+                category="PromptPalette-F",
                 inputs=[
                     # V3 has no first-class LIST input — declare String here
                     # and rely on V1 INPUT_TYPES "LIST" for the real slot type.
@@ -522,7 +522,7 @@ class GetFirstWordList(BaseNodeClass):
     RETURN_TYPES = ("STRING", "LIST")
     RETURN_NAMES = ("text", "list")
     FUNCTION = "execute"
-    CATEGORY = "utils"
+    CATEGORY = "PromptPalette-F"
 
     @classmethod
     def execute(cls, items=None, stop_word=",", use_regex=False, trim=True,
@@ -579,7 +579,7 @@ class PromptTabs(BaseNodeClass):
             return io.Schema(
                 node_id="PromptTabs",
                 display_name="Prompt Tabs",
-                category="utils",
+                category="PromptPalette-F",
                 inputs=[
                     io.String.Input(
                         "text",
@@ -623,7 +623,7 @@ class PromptTabs(BaseNodeClass):
     RETURN_TYPES = ("STRING", "STRING")
     RETURN_NAMES = ("text", "label")
     FUNCTION = "execute"
-    CATEGORY = "utils"
+    CATEGORY = "PromptPalette-F"
 
     @staticmethod
     def _active_label(tabs_data):
@@ -675,7 +675,7 @@ class NodeValueTemplate(BaseNodeClass):
             return io.Schema(
                 node_id="NodeValueTemplate",
                 display_name="Node Value Template",
-                category="utils",
+                category="PromptPalette-F",
                 inputs=[
                     io.String.Input(
                         "template",
@@ -709,7 +709,7 @@ class NodeValueTemplate(BaseNodeClass):
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("text",)
     FUNCTION = "execute"
-    CATEGORY = "utils"
+    CATEGORY = "PromptPalette-F"
 
     @classmethod
     def execute(cls, template=""):
