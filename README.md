@@ -3,6 +3,11 @@
 ## (共通)インストール
 
 1. ComfyUIの `custom_nodes` ディレクトリにクローン
+
+```powershell
+git clone https://github.com/id-fa/ComfyUI-PromptPalette-F promptpalette-f 
+```
+
 2. ComfyUIを再起動
 
 もしくはComfyUI Managerからインストール（※少し古いバージョンになることがあります）
@@ -282,6 +287,11 @@ A custom node for ComfyUI that makes prompt editing easier by allowing phrase sw
 ## Installation
 
 1. Clone into the `custom_nodes` directory of ComfyUI
+
+```
+git clone https://github.com/id-fa/ComfyUI-PromptPalette-F promptpalette-f 
+```
+
 2. Restart ComfyUI
 
 ## Usage
