@@ -724,6 +724,225 @@ class NodeValueTemplate(BaseNodeClass):
             return (template,)
 
 
+class PromptTabsTranslate(BaseNodeClass):
+    """Prompt Tabs variant with a per-tab source + translated text pair.
+
+    Each tab holds two independently-editable fields — ``source`` (the original
+    prompt) and ``translated`` (its translation) — stored in the hidden
+    ``tabs_data`` JSON managed by ``web/prompt_tabs_translate.js`` as
+    ``{"tabs": [{"name", "source", "translated"}], "active": int}``. The visible
+    ``text`` / ``translated`` widgets are the editors for the active tab.
+
+    Translation itself runs in the frontend on button click via the
+    ``/promptpalette_f/translate`` server route below (so it happens immediately,
+    not only at queue time). Python only passes the active editors through plus
+    the active tab's name, so the node degrades to two plain text boxes if the
+    frontend extension fails to load. Do not move tab-selection or translation
+    logic into ``execute`` — it only reads what the frontend already chose.
+    """
+
+    if V3_AVAILABLE:
+        @classmethod
+        def define_schema(cls):
+            return io.Schema(
+                node_id="PromptTabsTranslate",
+                display_name="Prompt Tabs + Translate",
+                category="PromptPalette-F",
+                inputs=[
+                    io.String.Input(
+                        "text",
+                        multiline=True,
+                        default="",
+                        tooltip="Source text of the currently selected tab.",
+                    ),
+                    io.String.Input(
+                        "translated",
+                        multiline=True,
+                        default="",
+                        tooltip="Translated text of the currently selected tab (freely editable).",
+                    ),
+                    io.String.Input(
+                        "tabs_data",
+                        default="",
+                        tooltip="Internal tab storage (managed by the UI).",
+                    ),
+                ],
+                outputs=[
+                    io.String.Output(display_name="source"),
+                    io.String.Output(display_name="translated"),
+                    io.String.Output(display_name="label"),
+                ],
+            )
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text": ("STRING", {
+                    "multiline": True,
+                    "default": "",
+                    "tooltip": "Source text of the currently selected tab.",
+                }),
+                "translated": ("STRING", {
+                    "multiline": True,
+                    "default": "",
+                    "tooltip": "Translated text of the currently selected tab (freely editable).",
+                }),
+                "tabs_data": ("STRING", {
+                    "default": "",
+                    "tooltip": "Internal tab storage (managed by the UI).",
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("source", "translated", "label")
+    FUNCTION = "execute"
+    CATEGORY = "PromptPalette-F"
+
+    @staticmethod
+    def _active_label(tabs_data):
+        # Pull the active tab's name out of the JSON the frontend maintains.
+        # Any malformed/missing data degrades to an empty label.
+        try:
+            data = json.loads(tabs_data) if tabs_data else None
+        except (ValueError, TypeError):
+            return ""
+        if not isinstance(data, dict):
+            return ""
+        tabs = data.get("tabs")
+        active = data.get("active", 0)
+        if not isinstance(tabs, list) or not isinstance(active, int):
+            return ""
+        if not (0 <= active < len(tabs)):
+            return ""
+        name = tabs[active].get("name") if isinstance(tabs[active], dict) else None
+        return name if isinstance(name, str) else ""
+
+    @classmethod
+    def execute(cls, text="", translated="", tabs_data=""):
+        if not isinstance(text, str):
+            text = ""
+        if not isinstance(translated, str):
+            translated = ""
+        label = cls._active_label(tabs_data)
+        if V3_AVAILABLE:
+            return io.NodeOutput(text, translated, label)
+        else:
+            return (text, translated, label)
+
+
+# ---------------------------------------------------------------------------
+# Translation backend for the "Prompt Tabs + Translate" node.
+#
+# Exposes POST /promptpalette_f/translate so the frontend can translate on
+# button click (immediately, not only at queue time). Translation needs no API
+# key: it prefers the optional `googletrans` library if installed, otherwise it
+# falls back to Google's free translate web endpoint via aiohttp (which ComfyUI
+# already ships). Both paths are best-effort and never raise to the caller.
+# ---------------------------------------------------------------------------
+
+# Map the UI's target codes to what each backend expects.
+_PPF_LANG_ALIASES = {
+    "ja": "ja",
+    "en": "en",
+    "zh": "zh-cn",
+    "zh-cn": "zh-cn",
+    "zh-CN": "zh-cn",
+}
+
+
+async def _ppf_try_googletrans(text, target):
+    """Translate via the optional googletrans library. Returns None if the
+    library is missing or fails, so the caller can fall back."""
+    try:
+        from googletrans import Translator
+    except Exception:
+        return None
+    try:
+        import inspect as _inspect
+        translator = Translator()
+        result = translator.translate(text, dest=target)
+        # googletrans 4.x's Translator.translate may be a coroutine (httpx-based)
+        # or a plain object depending on the installed version.
+        if _inspect.isawaitable(result):
+            result = await result
+        out = getattr(result, "text", None)
+        return out if isinstance(out, str) else None
+    except Exception:
+        return None
+
+
+async def _ppf_translate_via_endpoint(text, target):
+    """Fallback translation using Google's free translate web endpoint.
+    No API key required. Returns "" on failure."""
+    import aiohttp
+    url = "https://translate.googleapis.com/translate_a/single"
+    params = {
+        "client": "gtx",
+        "sl": "auto",
+        "tl": target,
+        "dt": "t",
+        "q": text,
+    }
+    try:
+        timeout = aiohttp.ClientTimeout(total=20)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, params=params) as resp:
+                # Google returns JSON but sometimes with a text/* content type.
+                data = await resp.json(content_type=None)
+    except Exception:
+        return ""
+    # Response shape: [[["translated chunk","original chunk", ...], ...], ...]
+    parts = []
+    if isinstance(data, list) and data and isinstance(data[0], list):
+        for seg in data[0]:
+            if isinstance(seg, list) and seg and isinstance(seg[0], str):
+                parts.append(seg[0])
+    return "".join(parts)
+
+
+async def _ppf_translate_text(text, target):
+    text = text if isinstance(text, str) else ""
+    if not text.strip():
+        return ""
+    target = _PPF_LANG_ALIASES.get(target, target or "en")
+    # Prefer googletrans when available; fall back to the free endpoint.
+    via_lib = await _ppf_try_googletrans(text, target)
+    if via_lib is not None:
+        return via_lib
+    return await _ppf_translate_via_endpoint(text, target)
+
+
+# Register the route once. Guarded so a missing server / double import never
+# breaks node loading.
+try:
+    from server import PromptServer
+    from aiohttp import web as _ppf_web
+
+    _ppf_server = PromptServer.instance
+    if _ppf_server is not None and not getattr(_ppf_server, "_ppf_translate_registered", False):
+        @_ppf_server.routes.post("/promptpalette_f/translate")
+        async def _ppf_translate_route(request):
+            try:
+                data = await request.json()
+            except Exception:
+                data = {}
+            text = data.get("text", "") if isinstance(data, dict) else ""
+            target = data.get("target", "en") if isinstance(data, dict) else "en"
+            try:
+                translated = await _ppf_translate_text(text, target or "en")
+                return _ppf_web.json_response({"translated": translated})
+            except Exception as e:
+                return _ppf_web.json_response({"error": str(e)}, status=500)
+
+        _ppf_server._ppf_translate_registered = True
+except Exception:
+    # No server context (e.g. unit import) — the node still loads; translation
+    # just won't be available until ComfyUI's server is running.
+    pass
+
+
 # V3 Extension entrypoint (only if V3 is available)
 if V3_AVAILABLE:
     class PromptPaletteExtension(ComfyExtension):
@@ -732,7 +951,7 @@ if V3_AVAILABLE:
             return os.path.join(os.path.dirname(os.path.realpath(__file__)), "web")
 
         async def get_node_list(self):
-            return [PromptPalette_F, SimpleMultiConcatText, GetFirstWord, GetFirstWordList, PromptTabs, NodeValueTemplate]
+            return [PromptPalette_F, SimpleMultiConcatText, GetFirstWord, GetFirstWordList, PromptTabs, PromptTabsTranslate, NodeValueTemplate]
 
     async def comfy_entrypoint():
         return PromptPaletteExtension()
@@ -745,6 +964,7 @@ NODE_CLASS_MAPPINGS = {
     "GetFirstWord": GetFirstWord,
     "GetFirstWordList": GetFirstWordList,
     "PromptTabs": PromptTabs,
+    "PromptTabsTranslate": PromptTabsTranslate,
     "NodeValueTemplate": NodeValueTemplate,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -753,6 +973,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "GetFirstWord": "Get First Word",
     "GetFirstWordList": "Get First Word (List)",
     "PromptTabs": "Prompt Tabs",
+    "PromptTabsTranslate": "Prompt Tabs + Translate",
     "NodeValueTemplate": "Node Value Template",
 }
 WEB_DIRECTORY = os.path.join(os.path.dirname(os.path.realpath(__file__)), "web")
