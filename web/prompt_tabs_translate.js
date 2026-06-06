@@ -160,6 +160,27 @@ function setupPromptTabsTranslate(node) {
     node.setDirtyCanvas(true, true);
   }
 
+  // Move a tab one slot left (dir = -1) or right (dir = +1), swapping it with
+  // its neighbor. The moved tab stays active and follows its new position.
+  function moveTab(i, dir) {
+    const j = i + dir;
+    if (j < 0 || j >= store.tabs.length) {
+      return;
+    }
+    saveEditorsIntoActive();
+    const tmp = store.tabs[i];
+    store.tabs[i] = store.tabs[j];
+    store.tabs[j] = tmp;
+    if (store.active === i) {
+      store.active = j;
+    } else if (store.active === j) {
+      store.active = i;
+    }
+    persist();
+    render();
+    node.setDirtyCanvas(true, true);
+  }
+
   function renameTab(i) {
     const current = store.tabs[i]?.name ?? "";
     const name = window.prompt("Tab name:", current);
@@ -293,6 +314,33 @@ function setupPromptTabsTranslate(node) {
       maxWidth: "180px",
     });
 
+    // Reorder arrows — only on the active tab, to keep the bar uncluttered.
+    // Disabled (greyed) at the ends so the range is obvious.
+    function makeMover(arrow, dir, title) {
+      const m = document.createElement("span");
+      m.textContent = arrow;
+      const j = i + dir;
+      const enabled = j >= 0 && j < store.tabs.length;
+      Object.assign(m.style, {
+        color: enabled ? "#dddddd" : "#666666",
+        fontWeight: "bold",
+        padding: "0 2px",
+        cursor: enabled ? "pointer" : "default",
+      });
+      m.title = title;
+      m.addEventListener("pointerdown", (e) => e.stopPropagation());
+      m.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (enabled) {
+          moveTab(i, dir);
+        }
+      });
+      return m;
+    }
+    if (active && store.tabs.length > 1) {
+      el.appendChild(makeMover("◀", -1, "Move tab left"));
+    }
+
     const label = document.createElement("span");
     label.textContent = tab.name || `Tab ${i + 1}`;
     Object.assign(label.style, {
@@ -310,6 +358,10 @@ function setupPromptTabsTranslate(node) {
       renameTab(i);
     });
     el.appendChild(label);
+
+    if (active && store.tabs.length > 1) {
+      el.appendChild(makeMover("▶", 1, "Move tab right"));
+    }
 
     if (store.tabs.length > 1) {
       const close = document.createElement("span");
