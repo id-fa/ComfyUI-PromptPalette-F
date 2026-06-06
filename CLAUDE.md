@@ -13,7 +13,7 @@ Bundled nodes:
 - **GetFirstWordList** (`Get First Word (List)`) — UI-less, applies Get First Word to every item of a LIST input, outputs both joined STRING and a LIST
 - **PromptTabs** (`Prompt Tabs`) — notepad-style node holding any number of named prompt tabs; outputs the active tab's text (STRING) and its name (STRING). Has its own frontend (`web/prompt_tabs.js`). Ported from ComfyUI-Lenient-Switch on 2026-06-03
 - **NodeValueTemplate** (`Node Value Template`) — string node that resolves `%NodeTitle.widget%` tokens against other nodes' widget values, mirroring `SaveImage`'s `filename_prefix` substitution. Token resolution happens in the frontend (`web/node_value_template.js`) via an `api.queuePrompt` patch. Added 2026-06-03
-- **PromptTabsTranslate** (`Prompt Tabs + Translate`) — Prompt Tabs variant where each tab holds a `source` + `translated` field pair (both editable). Three buttons translate the source into Japanese / English / Chinese on click via the backend route `POST /promptpalette_f/translate` (googletrans with a free-endpoint fallback, no API key). Outputs `source` / `translated` / `label`. Own frontend (`web/prompt_tabs_translate.js`). Added 2026-06-05
+- **PromptTabsTranslate** (`Prompt Tabs + Translate`) — Prompt Tabs variant where each tab holds a `source` + `translated` field pair (both editable). Three buttons translate the source into Japanese / English / Chinese on click via the backend route `POST /promptpalette_f/translate` (googletrans with a free-endpoint fallback, no API key). A `⇅ 入れ替え` button swaps the active tab's source and translated text. Outputs `source` / `translated` / `label`. Own frontend (`web/prompt_tabs_translate.js`). Added 2026-06-05 (swap button 2026-06-06)
 
 ## Architecture
 
@@ -533,6 +533,9 @@ This project includes `pyproject.toml` for ComfyUI registry publication followin
 - **Repository**: https://github.com/id-fa/ComfyUI-PromptPalette-F
 
 ## Development Status
+
+### Recent Changes (June 6, 2026)
+- ✅ **`PromptTabsTranslate` swap button** (`web/prompt_tabs_translate.js`): added a `⇅ 入れ替え` button that exchanges the active tab's `source` and `translated` field values. `swapSourceTranslated()` sets both `sourceWidget.value` / `transWidget.value` programmatically (does NOT fire the editors' `input` listeners — same no-feedback-loop pattern as `loadActiveIntoEditors`), then `saveEditorsIntoActive()` flushes into `tabs_data`, clears the status span, and re-renders. The button sits in the translate-button bar (`btnInner`) AFTER the three translate buttons and BEFORE the status span; purple styling (`#3a2d4a` bg) distinguishes it from the translate buttons. `setButtonsDisabled()` now disables `swapBtn` too (`[...buttons, swapBtn]`) so it's greyed out during an in-flight translation. Affects the active tab only; persisted to the `tabs_data` JSON store like every other edit
 
 ### Recent Changes (June 5, 2026)
 - ✅ **`PromptTabsTranslate` node added** (`nodes.py` + new `web/prompt_tabs_translate.js` + `requirements.txt`): a Prompt Tabs variant that keeps a `source` + `translated` field pair per tab and translates on button click

@@ -18,9 +18,9 @@ import { api } from "../../scripts/api.js";
 
 // Target languages for the three buttons. `code` is sent to the backend.
 const TRANSLATE_TARGETS = [
-  { code: "ja", label: "日本語に翻訳", flag: "🇯🇵" },
-  { code: "en", label: "英語に翻訳", flag: "🇬🇧" },
-  { code: "zh-cn", label: "中国語に翻訳", flag: "🇨🇳" },
+  { code: "ja", label: "日本語", flag: "🇯🇵" },
+  { code: "en", label: "英語", flag: "🇬🇧" },
+  { code: "zh-cn", label: "中国語", flag: "🇨🇳" },
 ];
 
 function hideWidget(widget) {
@@ -243,6 +243,21 @@ function setupPromptTabsTranslate(node) {
     }
   }
 
+  // Swap the source and translated text of the active tab. Useful when a
+  // translation lands in the "wrong" direction, or to keep editing in the
+  // other field.
+  function swapSourceTranslated() {
+    const src = sourceWidget.value ?? "";
+    const trans = transWidget.value ?? "";
+    // Programmatic set: does not fire the editors' "input" listeners.
+    sourceWidget.value = trans;
+    transWidget.value = src;
+    saveEditorsIntoActive();
+    setStatus(""); // clear any previous message
+    render();
+    node.setDirtyCanvas(true, true);
+  }
+
   // ---- DOM: tab bar --------------------------------------------------------
 
   const bar = document.createElement("div");
@@ -379,6 +394,18 @@ function setupPromptTabsTranslate(node) {
   });
   btnBar.appendChild(btnInner);
 
+  // "Translate:" prefix label so the buttons can show just the language name.
+  const translateLabel = document.createElement("span");
+  translateLabel.textContent = "Translate:";
+  Object.assign(translateLabel.style, {
+    flex: "0 0 auto",
+    fontSize: "12px",
+    color: "#9aa0a6",
+    fontWeight: "bold",
+    whiteSpace: "nowrap",
+  });
+  btnInner.appendChild(translateLabel);
+
   const buttons = [];
   for (const t of TRANSLATE_TARGETS) {
     const b = document.createElement("button");
@@ -404,6 +431,29 @@ function setupPromptTabsTranslate(node) {
     buttons.push(b);
   }
 
+  // Swap button — exchanges the source and translated fields.
+  const swapBtn = document.createElement("button");
+  swapBtn.textContent = "⇅ 入れ替え";
+  swapBtn.title = "原文と訳文を入れ替える"; // "Swap source and translation"
+  Object.assign(swapBtn.style, {
+    flex: "0 0 auto",
+    padding: "3px 6px",
+    borderRadius: "4px",
+    cursor: "pointer",
+    userSelect: "none",
+    border: "1px solid #555",
+    background: "#3a2d4a",
+    color: "#e2cfff",
+    fontSize: "12px",
+    whiteSpace: "nowrap",
+  });
+  swapBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
+  swapBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    swapSourceTranslated();
+  });
+  btnInner.appendChild(swapBtn);
+
   const statusEl = document.createElement("span");
   Object.assign(statusEl.style, {
     flex: "0 0 auto",
@@ -421,7 +471,7 @@ function setupPromptTabsTranslate(node) {
     statusEl.style.color = isError ? "#e57373" : "#9aa0a6";
   }
   function setButtonsDisabled(disabled) {
-    for (const b of buttons) {
+    for (const b of [...buttons, swapBtn]) {
       b.disabled = disabled;
       b.style.opacity = disabled ? "0.5" : "1";
       b.style.cursor = disabled ? "default" : "pointer";
