@@ -47,3 +47,6 @@ temp/
 *.pth
 # SpecStory explanation file
 .specstory/.what-is-this.md
+/sample_nodes
+/node_modules
+/.claude_log
