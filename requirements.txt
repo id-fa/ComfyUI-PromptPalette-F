@@ -6,3 +6,5 @@
 # ComfyUI already ships. Install googletrans yourself only if you prefer it:
 #
 #   pip install googletrans==4.0.2
+
+googletrans

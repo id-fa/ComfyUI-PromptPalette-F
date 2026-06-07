@@ -6,7 +6,7 @@
 
 ```bash
 cd ComfyUI/custom_nodes
-git clone https://github.com/id-fa/ComfyUI-PromptPalette-F promptpalette-f
+git clone https://github.com/id-fa/ComfyUI-PromptPalette-F prompt-palette-f
 ```
 
 2. ComfyUIを再起動
