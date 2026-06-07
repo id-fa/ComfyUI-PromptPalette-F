@@ -407,6 +407,7 @@ function setupPromptTabsTranslate(node) {
   function render() {
     inner.replaceChildren(...store.tabs.map((t, i) => makeTab(t, i)), makePlus());
     node.setDirtyCanvas(true, true);
+    scheduleAdjustEditorHeights(node);
   }
 
   const tabWidget = node.addDOMWidget("prompt_tabs_bar", "prompt_tabs_bar", bar, {
@@ -597,6 +598,11 @@ function setupPromptTabsTranslate(node) {
 
   node._promptTabsTranslate = { reload };
   reload();
+
+  // Size the editors once the Vue-rendered DOM exists (mount can land a little
+  // after setup).
+  setTimeout(() => applyEditorRowSizing(node), 100);
+  setTimeout(() => applyEditorRowSizing(node), 500);
 }
 
 function findTextArea(widget) {
@@ -605,4 +611,56 @@ function findTextArea(widget) {
     el = el.querySelector?.("textarea") || null;
   }
   return el && el.tagName === "TEXTAREA" ? el : null;
+}
+
+// Re-assert the editor row sizing on the next frame(s), after Vue has
+// re-rendered the node's DOM in response to a state change.
+function scheduleAdjustEditorHeights(node) {
+  if (typeof requestAnimationFrame !== "function") {
+    applyEditorRowSizing(node);
+    return;
+  }
+  requestAnimationFrame(() => requestAnimationFrame(() => applyEditorRowSizing(node)));
+}
+
+// Nodes 2.0 only. The Vue node body is a CSS grid whose default
+// `align-content: stretch` stretches every `auto` row to fill the node's
+// height. A node with a SINGLE multiline widget therefore stretches its sole
+// editor nicely (e.g. Prompt Tabs), but our node has SIX widget rows (tab bar,
+// translate buttons, two section labels, two editors) — so the spare height is
+// split across all of them, inflating the chrome rows and leaving each editor
+// stuck at ~4-6 lines no matter how tall the node is.
+//
+// Fix: pin the non-editor rows to `min-content` so they only stretch the editor
+// rows. The editor rows stay `auto` (min = the textarea's `min-h-16`), so the
+// node can still be shrunk back down — NOT an explicit pixel height, which would
+// force the node's minimum height up and make it un-shrinkable.
+//
+// Classic mode has no `.lg-node` DOM, so every lookup misses and this is a
+// harmless no-op there.
+function applyEditorRowSizing(node) {
+  const root = document.querySelector('.lg-node[data-node-id="' + node.id + '"]');
+  if (!root) return;
+  const grid = root.querySelector(".lg-node-widgets");
+  if (!grid) return;
+
+  const children = [...grid.children];
+  if (!children.some((c) => c.querySelector("textarea"))) return; // not mounted yet
+
+  const desired = children
+    .map((c) => (c.querySelector("textarea") ? "auto" : "min-content"))
+    .join(" ");
+  if (grid.style.gridTemplateRows !== desired) {
+    grid.style.gridTemplateRows = desired;
+  }
+
+  // ComfyUI rewrites the grid's inline `grid-template-rows` on every layout
+  // pass; re-assert ours whenever it does. Setting our own value re-fires the
+  // observer, but then `desired` already matches and we skip — so no loop.
+  if (node._pptRowGrid !== grid && typeof MutationObserver !== "undefined") {
+    if (node._pptRowObserver) node._pptRowObserver.disconnect();
+    node._pptRowObserver = new MutationObserver(() => applyEditorRowSizing(node));
+    node._pptRowObserver.observe(grid, { attributes: true, attributeFilter: ["style"] });
+    node._pptRowGrid = grid;
+  }
 }
