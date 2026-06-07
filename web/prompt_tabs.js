@@ -45,6 +45,21 @@ app.registerExtension({
       this._promptTabs?.reload();
       return result;
     };
+
+    // Tear down per-node observers/listeners on removal so deleting a node — or
+    // loading a new workflow, which removes EVERY node — doesn't leak the
+    // ResizeObserver + two MutationObservers (one watches the node root subtree)
+    // and the detached DOM they pin. Without this, repeated workflow reloads
+    // accumulate observers and can eventually crash the tab.
+    const onRemoved = nodeType.prototype.onRemoved;
+    nodeType.prototype.onRemoved = function () {
+      try {
+        this._promptTabs?.cleanup?.();
+      } catch (e) {
+        /* ignore */
+      }
+      return onRemoved?.apply(this, arguments);
+    };
   },
 });
 
@@ -196,6 +211,22 @@ function setupPromptTabs(node) {
     node.setDirtyCanvas(true, true);
   }
 
+  // Disconnect everything this setup attached. Called from onRemoved.
+  function cleanup() {
+    if (node._pptRowObserver) { try { node._pptRowObserver.disconnect(); } catch (e) {} }
+    if (node._pptRootObserver) { try { node._pptRootObserver.disconnect(); } catch (e) {} }
+    node._pptRowObserver = null;
+    node._pptRootObserver = null;
+    node._pptRowGrid = null;
+    node._pptRootEl = null;
+    (node._pptResizeObservers || []).forEach((ro) => {
+      try { ro.disconnect(); } catch (e) {}
+    });
+    node._pptResizeObservers = [];
+    const ta = findTextArea(textWidget);
+    if (ta) { try { ta.removeEventListener("input", saveEditorIntoActive); } catch (e) {} }
+  }
+
   // ---- DOM tab bar ---------------------------------------------------------
 
   // Outer element is sized by ComfyUI; the inner flex row keeps its natural
@@ -337,24 +368,14 @@ function setupPromptTabs(node) {
     hideOnZoom: false,
   });
 
-  // Report the wrapped height. `inner` is never height-forced, so its
-  // offsetHeight reflects the real number of rows (grows/shrinks with wrap).
-  let measuredHeight = 24;
-  tabWidget.computeSize = function (width) {
-    const h = inner.offsetHeight;
-    if (h > 0) {
-      measuredHeight = h;
-    }
-    return [width, measuredHeight];
-  };
-
-  // Re-layout the node when wrapping changes the bar's height.
-  try {
-    const ro = new ResizeObserver(() => node.setDirtyCanvas(true, true));
-    ro.observe(inner);
-  } catch (e) {
-    /* ResizeObserver unavailable — width changes still trigger redraws */
-  }
+  // Report the wrapped height. `inner` is never height-forced, so its measured
+  // height reflects the real number of rows (grows/shrinks with wrap). The
+  // height is cached by a ResizeObserver rather than read inside computeSize:
+  // LiteGraph calls computeSize many times per frame, and a synchronous
+  // offsetHeight read there forces a layout reflow each time — a measurable
+  // jank source (the "Forced reflow" / long-rAF console violations).
+  const tabH = trackHeight(node, inner, 24);
+  tabWidget.computeSize = (width) => [width, tabH.h];
 
   // Place the tab bar directly above the text editor.
   const barIdx = node.widgets.indexOf(tabWidget);
@@ -379,7 +400,7 @@ function setupPromptTabs(node) {
     return dataWidget.value;
   };
 
-  node._promptTabs = { reload };
+  node._promptTabs = { reload, cleanup };
   reload();
 
   // Size the editor once the Vue-rendered DOM exists (mount can land a little
@@ -394,6 +415,36 @@ function findTextArea(widget) {
     el = el.querySelector?.("textarea") || null;
   }
   return el && el.tagName === "TEXTAREA" ? el : null;
+}
+
+// Cache an element's rendered height so a widget's computeSize can return it
+// WITHOUT reading offsetHeight on every call. computeSize runs many times per
+// frame during LiteGraph layout; a sync offsetHeight read there forces a layout
+// reflow each time. A ResizeObserver fires AFTER layout, so reading the box size
+// in its callback is cheap and batched. Returns `{ h }` — read `.h` in
+// computeSize. Only redraws when the height actually changes (no feedback loop:
+// computeSize returns the cached value, so it never resizes the element).
+function trackHeight(node, el, initial) {
+  const state = { h: initial };
+  try {
+    const ro = new ResizeObserver((entries) => {
+      const box = entries[0] && entries[0].borderBoxSize && entries[0].borderBoxSize[0];
+      const h = box ? box.blockSize : el.offsetHeight;
+      if (h > 0 && h !== state.h) {
+        state.h = h;
+        node.setDirtyCanvas(true, true);
+      }
+    });
+    ro.observe(el);
+    // Registered so onRemoved/cleanup can disconnect it (otherwise the observer
+    // keeps the node + detached element alive).
+    node._pptResizeObservers = node._pptResizeObservers || [];
+    node._pptResizeObservers.push(ro);
+  } catch (e) {
+    // ResizeObserver unavailable — fall back to a one-time read.
+    state.h = el.offsetHeight || initial;
+  }
+  return state;
 }
 
 // Re-assert the editor row sizing on the next frame(s), after Vue has
@@ -441,5 +492,21 @@ function applyEditorRowSizing(node) {
     node._pptRowObserver = new MutationObserver(() => applyEditorRowSizing(node));
     node._pptRowObserver.observe(grid, { attributes: true, attributeFilter: ["style"] });
     node._pptRowGrid = grid;
+  }
+
+  // The Vue renderer sometimes REPLACES the whole `.lg-node-widgets` grid on a
+  // remount (e.g. after a heavy reflow). The style observer above is then
+  // stranded on the detached old grid and never fires again, so our row sizing
+  // is never re-applied to the fresh grid and the editor reverts to ComfyUI's
+  // default layout (the "height adjustment stopped working" state). Watch the
+  // node root for structural changes so a grid swap re-triggers us on the new
+  // grid. `childList` (no attributes) fires only on DOM add/remove, not on style
+  // churn or typing, and setting `gridTemplateRows` above adds no nodes — so no
+  // loop. The root element is keyed by node id and far more stable than the grid.
+  if (node._pptRootEl !== root && typeof MutationObserver !== "undefined") {
+    if (node._pptRootObserver) node._pptRootObserver.disconnect();
+    node._pptRootObserver = new MutationObserver(() => scheduleAdjustEditorHeights(node));
+    node._pptRootObserver.observe(root, { childList: true, subtree: true });
+    node._pptRootEl = root;
   }
 }
