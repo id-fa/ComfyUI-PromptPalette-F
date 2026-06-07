@@ -836,10 +836,10 @@ class PromptTabsTranslate(BaseNodeClass):
 # Translation backend for the "Prompt Tabs + Translate" node.
 #
 # Exposes POST /promptpalette_f/translate so the frontend can translate on
-# button click (immediately, not only at queue time). Translation needs no API
-# key: it prefers the optional `googletrans` library if installed, otherwise it
-# falls back to Google's free translate web endpoint via aiohttp (which ComfyUI
-# already ships). Both paths are best-effort and never raise to the caller.
+# button click (immediately, not only at queue time). Translation is handled by
+# the `googletrans` library (see requirements.txt); no API key is required.
+# The handler is best-effort and never raises to the caller — if googletrans is
+# missing or fails, it returns an empty translation.
 # ---------------------------------------------------------------------------
 
 # Map the UI's target codes to what each backend expects.
@@ -853,8 +853,8 @@ _PPF_LANG_ALIASES = {
 
 
 async def _ppf_try_googletrans(text, target):
-    """Translate via the optional googletrans library. Returns None if the
-    library is missing or fails, so the caller can fall back."""
+    """Translate via the googletrans library. Returns None if the library is
+    missing or fails (the caller then returns an empty translation)."""
     try:
         from googletrans import Translator
     except Exception:
@@ -873,45 +873,15 @@ async def _ppf_try_googletrans(text, target):
         return None
 
 
-async def _ppf_translate_via_endpoint(text, target):
-    """Fallback translation using Google's free translate web endpoint.
-    No API key required. Returns "" on failure."""
-    import aiohttp
-    url = "https://translate.googleapis.com/translate_a/single"
-    params = {
-        "client": "gtx",
-        "sl": "auto",
-        "tl": target,
-        "dt": "t",
-        "q": text,
-    }
-    try:
-        timeout = aiohttp.ClientTimeout(total=20)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url, params=params) as resp:
-                # Google returns JSON but sometimes with a text/* content type.
-                data = await resp.json(content_type=None)
-    except Exception:
-        return ""
-    # Response shape: [[["translated chunk","original chunk", ...], ...], ...]
-    parts = []
-    if isinstance(data, list) and data and isinstance(data[0], list):
-        for seg in data[0]:
-            if isinstance(seg, list) and seg and isinstance(seg[0], str):
-                parts.append(seg[0])
-    return "".join(parts)
-
-
 async def _ppf_translate_text(text, target):
     text = text if isinstance(text, str) else ""
     if not text.strip():
         return ""
     target = _PPF_LANG_ALIASES.get(target, target or "en")
-    # Prefer googletrans when available; fall back to the free endpoint.
+    # Translation is handled entirely by googletrans. On any failure (missing
+    # library, network error, etc.) we return an empty translation.
     via_lib = await _ppf_try_googletrans(text, target)
-    if via_lib is not None:
-        return via_lib
-    return await _ppf_translate_via_endpoint(text, target)
+    return via_lib if via_lib is not None else ""
 
 
 # Register the route once. Guarded so a missing server / double import never

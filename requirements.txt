@@ -1,10 +1,7 @@
-# ComfyUI-PromptPalette-F has no required Python dependencies.
+# ComfyUI-PromptPalette-F dependencies.
 #
-# Optional: the "Prompt Tabs + Translate" node can use googletrans for
-# translation. It is NOT required — when googletrans is missing, the node falls
-# back to Google's free translate web endpoint (no API key) via aiohttp, which
-# ComfyUI already ships. Install googletrans yourself only if you prefer it:
-#
-#   pip install googletrans==4.0.2
+# googletrans is required by the "Prompt Tabs + Translate" node, which uses it
+# to translate text (no API key needed). When googletrans is missing or fails,
+# the node simply returns an empty translation.
 
 googletrans
