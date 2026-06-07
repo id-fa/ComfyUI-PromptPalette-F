@@ -838,8 +838,10 @@ class PromptTabsTranslate(BaseNodeClass):
 # Exposes POST /promptpalette_f/translate so the frontend can translate on
 # button click (immediately, not only at queue time). Translation is handled by
 # the `googletrans` library (see requirements.txt); no API key is required.
-# The handler is best-effort and never raises to the caller — if googletrans is
-# missing or fails, it returns an empty translation.
+# On failure (library missing, runtime/network error) it raises
+# _PPFTranslateError with a clear, user-facing message; the route turns that
+# into a JSON {"error": ...} response so the UI can show why nothing happened
+# instead of silently returning an empty translation.
 # ---------------------------------------------------------------------------
 
 # Map the UI's target codes to what each backend expects.
@@ -852,25 +854,77 @@ _PPF_LANG_ALIASES = {
 }
 
 
-async def _ppf_try_googletrans(text, target):
-    """Translate via the googletrans library. Returns None if the library is
-    missing or fails (the caller then returns an empty translation)."""
+class _PPFTranslateError(Exception):
+    """Translation could not be performed. Carries a clear, user-facing message
+    (shown by the frontend as "翻訳失敗: <message>")."""
+    pass
+
+
+# Shown when the googletrans library can't be imported. Kept here so the message
+# is easy to find/edit; it tells the user exactly how to fix it.
+_PPF_GOOGLETRANS_MISSING_MSG = (
+    "googletrans がインストールされていません。ComfyUI の Python 環境で "
+    "`pip install googletrans` を実行して ComfyUI を再起動してください "
+    "(requirements.txt 参照) / googletrans is not installed. Run "
+    "`pip install googletrans` in ComfyUI's Python environment and restart."
+)
+
+
+async def _ppf_aclose_translator(translator):
+    """Best-effort close of googletrans 4.x's underlying httpx AsyncClient.
+    Prevents 'coroutine AsyncClient.get was never awaited' warnings when a
+    translate call fails partway through. No-op for sync versions."""
+    client = getattr(translator, "client", None)
+    aclose = getattr(client, "aclose", None)
+    if aclose is None:
+        return
+    try:
+        result = aclose()
+        import inspect as _inspect
+        if _inspect.isawaitable(result):
+            await result
+    except Exception:
+        pass
+
+
+async def _ppf_googletrans_translate(text, target):
+    """Translate via googletrans. Raises _PPFTranslateError with a clear,
+    user-facing message if the library is missing or the call fails."""
     try:
         from googletrans import Translator
-    except Exception:
-        return None
+    except ImportError:
+        raise _PPFTranslateError(_PPF_GOOGLETRANS_MISSING_MSG)
+    except Exception as e:
+        # A broken install (e.g. incompatible httpx) can fail at import time
+        # with something other than ImportError — surface it clearly too.
+        raise _PPFTranslateError(
+            f"googletrans の読み込みに失敗しました / failed to load googletrans: {e}"
+        )
+
+    import inspect as _inspect
+    translator = Translator()
     try:
-        import inspect as _inspect
-        translator = Translator()
         result = translator.translate(text, dest=target)
         # googletrans 4.x's Translator.translate may be a coroutine (httpx-based)
         # or a plain object depending on the installed version.
         if _inspect.isawaitable(result):
             result = await result
         out = getattr(result, "text", None)
-        return out if isinstance(out, str) else None
-    except Exception:
-        return None
+        if not isinstance(out, str):
+            raise _PPFTranslateError(
+                "googletrans から翻訳結果が得られませんでした "
+                "/ googletrans returned no text."
+            )
+        return out
+    except _PPFTranslateError:
+        raise
+    except Exception as e:
+        raise _PPFTranslateError(
+            f"googletrans の実行に失敗しました / googletrans failed "
+            f"({type(e).__name__}): {e}"
+        )
+    finally:
+        await _ppf_aclose_translator(translator)
 
 
 async def _ppf_translate_text(text, target):
@@ -878,10 +932,9 @@ async def _ppf_translate_text(text, target):
     if not text.strip():
         return ""
     target = _PPF_LANG_ALIASES.get(target, target or "en")
-    # Translation is handled entirely by googletrans. On any failure (missing
-    # library, network error, etc.) we return an empty translation.
-    via_lib = await _ppf_try_googletrans(text, target)
-    return via_lib if via_lib is not None else ""
+    # Translation is handled entirely by googletrans. Failures raise
+    # _PPFTranslateError, which the route turns into a JSON error response.
+    return await _ppf_googletrans_translate(text, target)
 
 
 # Register the route once. Guarded so a missing server / double import never
