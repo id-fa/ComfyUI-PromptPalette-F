@@ -12,8 +12,8 @@ const CONFIG = {
     spaceBetweenCheckboxAndText: 6,
     weightButtonSize: 16,
     weightLabelWidth: 24,
-    minWeight: 0.1,
-    maxWeight: 2.0,
+    minWeight: -6.0,
+    maxWeight: 6.0,
     previewSeparator: 20,    // Space between main content and preview
     previewHeight: 110,      // Height for 5 lines + header + padding
     previewFontSize: 12,     // Smaller font for preview
@@ -1777,7 +1777,7 @@ function getPhraseText(line, isCommented) {
     }
     
     // Remove weight notation from all lines
-    phraseText = phraseText.replace(/\(([^:]+):(\d+\.?\d*)\)/g, '$1');
+    phraseText = phraseText.replace(/\(([^:]+):(-?\d+\.?\d*)\)/g, '$1');
     
     // Remove trailing comma
     if (phraseText.trim().endsWith(',')) {
@@ -2089,7 +2089,7 @@ function getWeightText(text) {
 }
 
 function parseWeight(text) {
-    const match = text.match(/\(([^:]+):(\d+\.?\d*)\)/);
+    const match = text.match(/\(([^:]+):(-?\d+\.?\d*)\)/);
     if (match) {
         const weight = parseFloat(match[2]);
         return isNaN(weight) ? 1.0 : weight;
@@ -2098,7 +2098,7 @@ function parseWeight(text) {
 }
 
 function setWeight(text, weight) {
-    const cleanText = text.replace(/\(([^:]+):(\d+\.?\d*)\)/, '$1').trim();
+    const cleanText = text.replace(/\(([^:]+):(-?\d+\.?\d*)\)/, '$1').trim();
     // Remove trailing comma
     const textWithoutComma = cleanText.replace(/,\s*$/, '').trim();
     if (weight === 1.0) {
