@@ -7,6 +7,8 @@
 ```bash
 cd ComfyUI/custom_nodes
 git clone https://github.com/id-fa/ComfyUI-PromptPalette-F prompt-palette-f
+cd prompt-palette-f
+pip install -r requirements.txt
 ```
 
 2. ComfyUIを再起動
@@ -317,7 +319,9 @@ A custom node for ComfyUI that makes prompt editing easier by allowing phrase sw
 
 ```bash
 cd ComfyUI/custom_nodes
-git clone https://github.com/id-fa/ComfyUI-PromptPalette-F promptpalette-f
+git clone https://github.com/id-fa/ComfyUI-PromptPalette-F prompt-palette-f
+cd prompt-palette-f
+pip install -r requirements.txt
 ```
 
 2. Restart ComfyUI
