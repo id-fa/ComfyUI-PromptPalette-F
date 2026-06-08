@@ -28,6 +28,7 @@ from nodes import (  # noqa: E402
     PromptTabsTranslate,
     NodeValueTemplate,
     GemmaTranslate,
+    GemmaImagePrompt,
 )
 
 
@@ -42,7 +43,7 @@ class TestStandaloneImport(unittest.TestCase):
             {
                 "PromptPalette_F", "SimpleMultiConcatText", "GetFirstWord",
                 "GetFirstWordList", "PromptTabs", "PromptTabsTranslate",
-                "NodeValueTemplate", "GemmaTranslate",
+                "NodeValueTemplate", "GemmaTranslate", "GemmaImagePrompt",
             },
         )
 
@@ -137,6 +138,101 @@ class TestGemmaTranslate(unittest.TestCase):
         self.assertEqual(
             GemmaTranslate._clean_translation("```json\nfoo\n```"), "foo"
         )
+
+
+class _FakeVisionClip:
+    """Stand-in for a Gemma4 vision CLIP. Records the prompt and whether an image
+    was passed, and returns a canned POSITIVE/NEGATIVE generation."""
+
+    def __init__(self, raw="POSITIVE: a cat sitting on a sofa\nNEGATIVE: blurry, lowres"):
+        self.raw = raw
+        self.last_prompt = None
+        self.got_image = False
+
+    def tokenize(self, prompt, image=None, **kwargs):
+        self.last_prompt = prompt
+        self.got_image = image is not None
+        return {"prompt": prompt}
+
+    def generate(self, tokens, **kwargs):
+        return [1, 2, 3]
+
+    def decode(self, ids):
+        return self.raw
+
+
+class TestGemmaImagePrompt(unittest.TestCase):
+    def test_no_image_no_instruction_returns_empty(self):
+        clip = _FakeVisionClip()
+        out = GemmaImagePrompt.execute(clip, image=None, instruction="   ")
+        self.assertEqual(out["result"], ("", ""))
+        self.assertIsNone(clip.last_prompt)  # no generation attempted
+
+    def test_parses_positive_and_negative(self):
+        clip = _FakeVisionClip()
+        out = GemmaImagePrompt.execute(
+            clip, image=object(), target_model="SDXL")
+        positive, negative = out["result"]
+        self.assertEqual(positive, "a cat sitting on a sofa")
+        self.assertEqual(negative, "blurry, lowres")
+        self.assertEqual(out["ui"], {
+            "positive": ["a cat sitting on a sofa"],
+            "negative": ["blurry, lowres"],
+        })
+        self.assertTrue(clip.got_image)  # image forwarded to the tokenizer
+
+    def test_no_image_uses_instruction_only(self):
+        clip = _FakeVisionClip(raw="POSITIVE: a red sports car\nNEGATIVE:")
+        out = GemmaImagePrompt.execute(
+            clip, image=None, instruction="a red sports car")
+        positive, negative = out["result"]
+        self.assertEqual(positive, "a red sports car")
+        self.assertEqual(negative, "")
+        self.assertFalse(clip.got_image)
+        self.assertIn("a red sports car", clip.last_prompt)
+
+    def test_settings_shape_the_request(self):
+        clip = _FakeVisionClip()
+        GemmaImagePrompt.execute(
+            clip, image=object(), output_format="Danbooru tags",
+            target_model="SDXL", detail_mode="Expand detail")
+        p = clip.last_prompt
+        self.assertIn("Danbooru", p)
+        self.assertIn("SDXL", p)
+        self.assertIn("negative prompt", p.lower())
+        self.assertIn("enrich", p.lower())
+
+    def test_flux_does_not_request_negative_prompt(self):
+        clip = _FakeVisionClip()
+        GemmaImagePrompt.execute(clip, image=object(), target_model="FLUX")
+        p = clip.last_prompt
+        self.assertIn("FLUX", p)
+        # FLUX branch tells the model to leave the negative prompt empty and
+        # must NOT ask it to "Also provide a concise negative prompt" (SDXL only).
+        self.assertNotIn("Also provide a concise negative prompt", p)
+        self.assertIn("leave the negative", p.lower())
+
+    def test_empty_negative_placeholder_normalized(self):
+        clip = _FakeVisionClip(raw="POSITIVE: a tree\nNEGATIVE: (empty)")
+        _, negative = GemmaImagePrompt.execute(clip, image=object())["result"]
+        self.assertEqual(negative, "")
+
+    def test_missing_labels_fall_back_to_positive(self):
+        clip = _FakeVisionClip(raw="just a plain prompt with no labels")
+        positive, negative = GemmaImagePrompt.execute(clip, image=object())["result"]
+        self.assertEqual(positive, "just a plain prompt with no labels")
+        self.assertEqual(negative, "")
+
+    def test_generation_error_is_caught(self):
+        class _BoomClip(_FakeVisionClip):
+            def generate(self, tokens, **kwargs):
+                raise RuntimeError("vision exploded")
+
+        out = GemmaImagePrompt.execute(_BoomClip(), image=object())
+        positive, negative = out["result"]
+        self.assertIn("Gemma Image Prompt error", positive)
+        self.assertIn("vision exploded", positive)
+        self.assertEqual(negative, "")
 
 
 class TestPromptPaletteF(unittest.TestCase):

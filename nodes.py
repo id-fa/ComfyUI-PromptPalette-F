@@ -1022,6 +1022,315 @@ class GemmaTranslate(BaseNodeClass):
         return cls._output(source, translated)
 
 
+class GemmaImagePrompt(BaseNodeClass):
+    """Generate a text-to-image prompt from an input image (and/or instructions)
+    using a Gemma4 vision-capable text encoder loaded via CLIPLoader.
+
+    EXPERIMENTAL / test node. Like GemmaTranslate it runs a real Gemma4 LLM
+    generation during graph execution (the same clip.tokenize / clip.generate /
+    clip.decode pipeline as ComfyUI's built-in TextGenerate node), but here the
+    image is fed to the multimodal tokenizer (clip.tokenize(..., image=image)) so
+    Gemma can "look at" it. The node asks the model to describe how to recreate a
+    visually similar image while honoring the user's modification instructions,
+    and to emit ONLY the prompt in a `POSITIVE:` / `NEGATIVE:` form that is parsed
+    into the two outputs.
+
+    The request prompt is adjusted by four settings: free-form modification
+    instructions, output style (natural language vs comma-separated Danbooru
+    tags), target model (FLUX vs SDXL — affects whether a negative prompt is
+    produced), and whether to keep changes minimal or expand the scene with extra
+    detail. With no image wired, the prompt is built from the instruction text
+    alone. Cannot run standalone (needs a loaded CLIP). Own frontend
+    (web/gemma_image_prompt.js, native widgets only) shows the two results.
+    Gemma-4-E4B may not fully follow every instruction — this is a test node.
+    """
+
+    if V3_AVAILABLE:
+        @classmethod
+        def define_schema(cls):
+            return io.Schema(
+                node_id="GemmaImagePrompt",
+                display_name="Gemma Image Prompt",
+                category="Prompt Palette-F",
+                inputs=[
+                    io.Clip.Input("clip"),
+                    io.Image.Input("image", optional=True),
+                    io.String.Input("instruction", multiline=True, default=""),
+                    io.Combo.Input(
+                        "output_format",
+                        options=["Natural language", "Danbooru tags"],
+                        default="Natural language",
+                    ),
+                    io.Combo.Input(
+                        "target_model",
+                        options=["FLUX", "SDXL"],
+                        default="FLUX",
+                    ),
+                    io.Combo.Input(
+                        "detail_mode",
+                        options=["Keep as instructed", "Expand detail"],
+                        default="Keep as instructed",
+                    ),
+                    io.Int.Input("max_length", default=512, min=1, max=2048),
+                    io.Boolean.Input("unload_after", default=False),
+                ],
+                outputs=[
+                    io.String.Output(display_name="positive"),
+                    io.String.Output(display_name="negative"),
+                ],
+            )
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        # NOTE: combos use the ("COMBO", {"options": [...]}) form, NOT a bare
+        # option list — every node here subclasses io.ComfyNode, so a bare-list
+        # combo crashes V3 prompt validation with "unhashable type: 'list'".
+        return {
+            "required": {
+                "clip": ("CLIP", {
+                    "tooltip": "A Gemma4 text encoder loaded by a CLIPLoader (type: gemma4). Must be a vision-capable Gemma4 build to use the image input.",
+                }),
+            },
+            "optional": {
+                "image": ("IMAGE", {
+                    "tooltip": "Image to analyze. When connected, Gemma describes how to recreate a similar image. When NOT connected, the prompt is built from the instruction text alone.",
+                }),
+                "instruction": ("STRING", {
+                    "default": "",
+                    "multiline": True,
+                    "tooltip": "Free-form modification instructions (e.g. 'make it night time, add rain'). Applied on top of the image analysis.",
+                }),
+                "output_format": ("COMBO", {
+                    "options": ["Natural language", "Danbooru tags"],
+                    "default": "Natural language",
+                    "tooltip": "Output style: fluent natural-language sentences, or a comma-separated list of Danbooru-style tags.",
+                }),
+                "target_model": ("COMBO", {
+                    "options": ["FLUX", "SDXL"],
+                    "default": "FLUX",
+                    "tooltip": "Intended generation model. FLUX → natural language, negative prompt kept empty. SDXL → also produces a negative prompt.",
+                }),
+                "detail_mode": ("COMBO", {
+                    "options": ["Keep as instructed", "Expand detail"],
+                    "default": "Keep as instructed",
+                    "tooltip": "Keep as instructed: change only what's requested, add nothing. Expand detail: enrich the scene with extra fitting objects/details.",
+                }),
+                "max_length": ("INT", {
+                    "default": 512,
+                    "min": 1,
+                    "max": 2048,
+                    "tooltip": "Maximum number of tokens to generate.",
+                }),
+                "unload_after": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Unload all models from VRAM after running. Affects the whole ComfyUI session's model cache (default OFF).",
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("positive", "negative")
+    FUNCTION = "execute"
+    CATEGORY = "Prompt Palette-F"
+
+    @classmethod
+    def _build_request(cls, instruction, image_present, output_format,
+                       target_model, detail_mode):
+        """Assemble the instruction prompt sent to Gemma, adjusted by settings."""
+        lines = [
+            "You are an expert prompt engineer for text-to-image diffusion models."
+        ]
+
+        if image_present:
+            lines.append(
+                "Look carefully at the provided image and write a prompt that would "
+                "generate a NEW image visually similar to it (same subject, "
+                "composition, style, colors and mood)."
+            )
+        else:
+            lines.append(
+                "Write a text-to-image prompt based solely on the user's request below."
+            )
+
+        if output_format == "Danbooru tags":
+            lines.append(
+                "Write the prompt as a comma-separated list of Danbooru-style tags "
+                "(lowercase, words joined by underscores), ordered from most to "
+                "least important."
+            )
+        else:
+            lines.append(
+                "Write the prompt as fluent, descriptive natural-language sentences."
+            )
+
+        if target_model == "SDXL":
+            lines.append(
+                "The target model is SDXL. Also provide a concise negative prompt "
+                "listing things to avoid (e.g. low quality, blurry, bad anatomy, "
+                "extra fingers, watermark)."
+            )
+        else:
+            lines.append(
+                "The target model is FLUX, which works best with descriptive "
+                "language and does NOT use a negative prompt — leave the negative "
+                "prompt empty."
+            )
+
+        if detail_mode == "Expand detail":
+            lines.append(
+                "Beyond any requested changes, enrich the scene with additional "
+                "fitting details and extra objects to make the image more elaborate."
+            )
+        else:
+            faithful = " while staying faithful to the source image" if image_present else ""
+            lines.append(
+                "Apply ONLY the changes explicitly requested" + faithful +
+                ". Do not invent or add new objects that were not requested."
+            )
+
+        instr = instruction.strip() if isinstance(instruction, str) else ""
+        if instr:
+            lines.append(f"User's modification request: {instr}")
+        elif image_present:
+            lines.append("No specific changes requested — recreate the image faithfully.")
+
+        lines.append(
+            "Output ONLY the prompt — no explanations, no commentary, no markdown, "
+            "no code fences. Respond in EXACTLY this format and nothing else:\n"
+            "POSITIVE: <the positive prompt>\n"
+            "NEGATIVE: <the negative prompt, or leave blank>"
+        )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _clean(s):
+        """Strip code fences and matching surrounding quotes from one field."""
+        if not isinstance(s, str):
+            return ""
+        s = s.strip()
+        if s.startswith("```"):
+            s = re.sub(r"^```[a-zA-Z]*\n?", "", s)
+            s = re.sub(r"\n?```$", "", s).strip()
+        if len(s) >= 2 and s[0] in "\"'「" and s[-1] in "\"'」":
+            s = s[1:-1].strip()
+        return s
+
+    # Placeholders a model may emit for "no negative prompt".
+    _EMPTY_NEG = {"", "(empty)", "empty", "none", "(none)", "n/a", "na", "-", "null"}
+
+    @classmethod
+    def _parse_pos_neg(cls, text):
+        """Pull POSITIVE / NEGATIVE sections out of the generated text. Falls back
+        to treating the whole output as the positive prompt if the labels are
+        missing."""
+        if not isinstance(text, str):
+            return "", ""
+        s = text.strip()
+        if s.startswith("```"):
+            s = re.sub(r"^```[a-zA-Z]*\n?", "", s)
+            s = re.sub(r"\n?```$", "", s).strip()
+
+        pos_match = re.search(
+            r"POSITIVE\s*[:：]\s*(.*?)(?=\n\s*NEGATIVE\s*[:：]|$)",
+            s, re.IGNORECASE | re.DOTALL,
+        )
+        neg_match = re.search(
+            r"NEGATIVE\s*[:：]\s*(.*)$", s, re.IGNORECASE | re.DOTALL,
+        )
+        if pos_match:
+            positive = pos_match.group(1).strip()
+            negative = neg_match.group(1).strip() if neg_match else ""
+        else:
+            positive = s
+            negative = ""
+
+        positive = cls._clean(positive)
+        negative = cls._clean(negative)
+        if negative.lower() in cls._EMPTY_NEG:
+            negative = ""
+        return positive, negative
+
+    @classmethod
+    def _generate(cls, clip, prompt, image, max_length):
+        """Run Gemma generation, passing the image to the multimodal tokenizer
+        when present. Each call has a TypeError fallback to a minimal signature
+        for older ComfyUI builds."""
+        if image is not None:
+            try:
+                tokens = clip.tokenize(
+                    prompt, image=image, skip_template=False,
+                    min_length=1, thinking=False,
+                )
+            except TypeError:
+                tokens = clip.tokenize(prompt, image=image)
+        else:
+            try:
+                tokens = clip.tokenize(
+                    prompt, skip_template=False, min_length=1, thinking=False,
+                )
+            except TypeError:
+                tokens = clip.tokenize(prompt)
+
+        try:
+            generated_ids = clip.generate(
+                tokens,
+                do_sample=False,
+                max_length=int(max_length),
+                temperature=0.7,
+                top_k=40,
+                top_p=0.9,
+                min_p=0.0,
+                repetition_penalty=1.0,
+                presence_penalty=0.0,
+                seed=0,
+            )
+        except TypeError:
+            generated_ids = clip.generate(tokens, max_length=int(max_length))
+
+        out = clip.decode(generated_ids)
+        return out if isinstance(out, str) else str(out)
+
+    @classmethod
+    def _output(cls, positive, negative):
+        ui = {"positive": [positive], "negative": [negative]}
+        if V3_AVAILABLE:
+            return io.NodeOutput(positive, negative, ui=ui)
+        return {"ui": ui, "result": (positive, negative)}
+
+    @classmethod
+    def execute(cls, clip, image=None, instruction="",
+                output_format="Natural language", target_model="FLUX",
+                detail_mode="Keep as instructed", max_length=512,
+                unload_after=False):
+        image_present = image is not None
+        instr = instruction if isinstance(instruction, str) else ""
+
+        # Nothing to work with: no image AND no instruction text.
+        if not image_present and not instr.strip():
+            return cls._output("", "")
+
+        request = cls._build_request(
+            instr, image_present, output_format, target_model, detail_mode
+        )
+
+        try:
+            raw = cls._generate(clip, request, image if image_present else None, max_length)
+            positive, negative = cls._parse_pos_neg(raw)
+        except Exception as e:
+            positive = f"[Gemma Image Prompt error] {type(e).__name__}: {e}"
+            negative = ""
+
+        if unload_after:
+            try:
+                import comfy.model_management as mm
+                mm.unload_all_models()
+                mm.soft_empty_cache()
+            except Exception:
+                pass
+
+        return cls._output(positive, negative)
+
+
 # ---------------------------------------------------------------------------
 # Translation backend for the "Prompt Tabs + Translate" node.
 #
@@ -1164,7 +1473,7 @@ if V3_AVAILABLE:
             return os.path.join(os.path.dirname(os.path.realpath(__file__)), "web")
 
         async def get_node_list(self):
-            return [PromptPalette_F, SimpleMultiConcatText, GetFirstWord, GetFirstWordList, PromptTabs, PromptTabsTranslate, NodeValueTemplate, GemmaTranslate]
+            return [PromptPalette_F, SimpleMultiConcatText, GetFirstWord, GetFirstWordList, PromptTabs, PromptTabsTranslate, NodeValueTemplate, GemmaTranslate, GemmaImagePrompt]
 
     async def comfy_entrypoint():
         return PromptPaletteExtension()
@@ -1180,6 +1489,7 @@ NODE_CLASS_MAPPINGS = {
     "PromptTabsTranslate": PromptTabsTranslate,
     "NodeValueTemplate": NodeValueTemplate,
     "GemmaTranslate": GemmaTranslate,
+    "GemmaImagePrompt": GemmaImagePrompt,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "PromptPalette_F": "PromptPalette-F",
@@ -1190,5 +1500,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PromptTabsTranslate": "Prompt Tabs + Translate",
     "NodeValueTemplate": "Node Value Template",
     "GemmaTranslate": "Gemma Translate",
+    "GemmaImagePrompt": "Gemma Image Prompt",
 }
 WEB_DIRECTORY = os.path.join(os.path.dirname(os.path.realpath(__file__)), "web")
