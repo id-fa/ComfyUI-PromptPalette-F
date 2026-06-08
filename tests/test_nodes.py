@@ -27,6 +27,7 @@ from nodes import (  # noqa: E402
     PromptTabs,
     PromptTabsTranslate,
     NodeValueTemplate,
+    GemmaTranslate,
 )
 
 
@@ -41,7 +42,7 @@ class TestStandaloneImport(unittest.TestCase):
             {
                 "PromptPalette_F", "SimpleMultiConcatText", "GetFirstWord",
                 "GetFirstWordList", "PromptTabs", "PromptTabsTranslate",
-                "NodeValueTemplate",
+                "NodeValueTemplate", "GemmaTranslate",
             },
         )
 
@@ -49,6 +50,92 @@ class TestStandaloneImport(unittest.TestCase):
         self.assertEqual(
             set(nodes.NODE_CLASS_MAPPINGS),
             set(nodes.NODE_DISPLAY_NAME_MAPPINGS),
+        )
+
+    def test_all_input_io_types_are_hashable_strings(self):
+        # Every node here subclasses io.ComfyNode, so ComfyUI treats them as V3
+        # and runs INPUT_TYPES through parse_class_inputs, which does
+        # `value[0] in DYNAMIC_INPUT_LOOKUP` (a dict). If an input's io_type
+        # (value[0]) is a bare list — e.g. a combo declared as
+        # (["English", ...], {...}) — that hashes a list and ComfyUI raises
+        # "unhashable type: 'list'" at prompt validation. Combos must instead be
+        # ("COMBO", {"options": [...]}). This guards every node's INPUT_TYPES.
+        for name, cls in nodes.NODE_CLASS_MAPPINGS.items():
+            spec = cls.INPUT_TYPES()
+            for category in ("required", "optional"):
+                for input_name, value in spec.get(category, {}).items():
+                    io_type = value[0]
+                    self.assertIsInstance(
+                        io_type, str,
+                        f"{name}.{input_name} io_type must be a string "
+                        f"(got {type(io_type).__name__}); use "
+                        f'("COMBO", {{"options": [...]}}) for dropdowns',
+                    )
+                    # Must be hashable (this is exactly what ComfyUI does).
+                    hash(io_type)
+
+
+class _FakeClip:
+    """Minimal stand-in for a Gemma4 CLIP. Records the instruction prompt and
+    returns a canned, deliberately-messy generation so the cleanup logic is
+    exercised."""
+
+    def __init__(self, raw="```\nTranslation: \"Hello world\"\n```"):
+        self.raw = raw
+        self.last_prompt = None
+
+    def tokenize(self, prompt, **kwargs):
+        self.last_prompt = prompt
+        return {"prompt": prompt}
+
+    def generate(self, tokens, **kwargs):
+        return [1, 2, 3]
+
+    def decode(self, ids):
+        return self.raw
+
+
+class TestGemmaTranslate(unittest.TestCase):
+    def test_empty_source_returns_empty(self):
+        clip = _FakeClip()
+        out = GemmaTranslate.execute(clip, text="   ", target_language="English")
+        self.assertEqual(out["result"], ("   ", ""))
+        # No generation should have been attempted for blank input.
+        self.assertIsNone(clip.last_prompt)
+
+    def test_translation_cleaned(self):
+        clip = _FakeClip()
+        out = GemmaTranslate.execute(clip, text="こんにちは", target_language="English")
+        source, translated = out["result"]
+        self.assertEqual(source, "こんにちは")
+        # Code fence, "Translation:" label and surrounding quotes all stripped.
+        self.assertEqual(translated, "Hello world")
+        # ui payload mirrors the translated output for the frontend.
+        self.assertEqual(out["ui"], {"translated": ["Hello world"]})
+
+    def test_target_language_in_prompt(self):
+        clip = _FakeClip(raw="你好")
+        GemmaTranslate.execute(clip, text="hello", target_language="Chinese")
+        self.assertIn("Chinese (Simplified)", clip.last_prompt)
+        self.assertIn("hello", clip.last_prompt)
+
+    def test_generation_error_is_caught(self):
+        class _BoomClip(_FakeClip):
+            def generate(self, tokens, **kwargs):
+                raise RuntimeError("model exploded")
+
+        out = GemmaTranslate.execute(_BoomClip(), text="x", target_language="English")
+        source, translated = out["result"]
+        self.assertEqual(source, "x")
+        self.assertIn("Gemma Translate error", translated)
+        self.assertIn("model exploded", translated)
+
+    def test_clean_translation_helper(self):
+        self.assertEqual(GemmaTranslate._clean_translation("  hi  "), "hi")
+        self.assertEqual(GemmaTranslate._clean_translation('"quoted"'), "quoted")
+        self.assertEqual(GemmaTranslate._clean_translation("「日本語」"), "日本語")
+        self.assertEqual(
+            GemmaTranslate._clean_translation("```json\nfoo\n```"), "foo"
         )
 
 

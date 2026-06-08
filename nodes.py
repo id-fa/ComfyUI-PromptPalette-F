@@ -832,6 +832,196 @@ class PromptTabsTranslate(BaseNodeClass):
             return (text, translated, label)
 
 
+class GemmaTranslate(BaseNodeClass):
+    """Translate text with a Gemma4 text encoder loaded via CLIPLoader.
+
+    Unlike "Prompt Tabs + Translate" (which translates instantly on a button
+    click through the googletrans backend route), this node runs an actual LLM
+    generation during graph execution. The CLIP it receives must be a Gemma4
+    encoder loaded by a standard CLIPLoader (type ``gemma4``); the same
+    ``clip.tokenize`` / ``clip.generate`` / ``clip.decode`` calls ComfyUI's own
+    ``TextGenerate`` node uses are issued here with a translation instruction
+    prompt. Because the model only lives inside the execution context, this node
+    cannot translate on its own — it is meant to run as part of a (typically
+    dedicated) workflow via Queue Prompt.
+
+    The generated translation is returned on the ``translated`` output and also
+    pushed to the frontend (``web/gemma_translate.js``) via the ``ui`` payload so
+    it appears in the node's translated field. An optional ``unload_after``
+    toggle frees the model from VRAM once the node finishes.
+    """
+
+    # UI choice -> language name embedded in the instruction prompt.
+    _LANG_NAMES = {
+        "English": "English",
+        "Japanese": "Japanese",
+        "Chinese": "Chinese (Simplified)",
+    }
+
+    if V3_AVAILABLE:
+        @classmethod
+        def define_schema(cls):
+            return io.Schema(
+                node_id="GemmaTranslate",
+                display_name="Gemma Translate",
+                category="Prompt Palette-F",
+                inputs=[
+                    io.Clip.Input("clip"),
+                    io.String.Input("text", multiline=True, default=""),
+                    io.Combo.Input(
+                        "target_language",
+                        options=["English", "Japanese", "Chinese"],
+                        default="English",
+                    ),
+                    io.Int.Input("max_length", default=512, min=1, max=2048),
+                    io.Boolean.Input("unload_after", default=False),
+                ],
+                outputs=[
+                    io.String.Output(display_name="source"),
+                    io.String.Output(display_name="translated"),
+                ],
+            )
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "clip": ("CLIP", {
+                    "tooltip": "A Gemma4 text encoder loaded by a CLIPLoader (type: gemma4). Place the model in ComfyUI/models/text_encoders/.",
+                }),
+                "text": ("STRING", {
+                    "default": "",
+                    "multiline": True,
+                    "tooltip": "Source text to translate.",
+                }),
+            },
+            "optional": {
+                # IMPORTANT: declare the combo as ("COMBO", {"options": [...]}),
+                # NOT as a bare option list (["English", ...], {...}).
+                # Because every node here subclasses io.ComfyNode, ComfyUI treats
+                # them as V3 and runs the inputs through parse_class_inputs, which
+                # does `value[0] in DYNAMIC_INPUT_LOOKUP` (a dict). A bare-list
+                # combo makes value[0] the option LIST itself → "unhashable type:
+                # 'list'" at prompt validation. The "COMBO" string keeps value[0]
+                # hashable and moves the options into extra_info (read back via
+                # io.Combo.io_type / extra_info["options"] during validation).
+                "target_language": ("COMBO", {
+                    "options": ["English", "Japanese", "Chinese"],
+                    "default": "English",
+                    "tooltip": "Language to translate the source text into.",
+                }),
+                "max_length": ("INT", {
+                    "default": 512,
+                    "min": 1,
+                    "max": 2048,
+                    "tooltip": "Maximum number of tokens to generate.",
+                }),
+                "unload_after": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Unload all models from VRAM after translating. Useful for a dedicated translation-only workflow; affects the whole ComfyUI session's model cache.",
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("source", "translated")
+    FUNCTION = "execute"
+    CATEGORY = "Prompt Palette-F"
+
+    @staticmethod
+    def _clean_translation(s):
+        """Strip the chatter small instruction-tuned models tend to add around
+        the actual translation: code fences, a leading 'Translation:' label, and
+        matching surrounding quotes."""
+        if not isinstance(s, str):
+            return ""
+        s = s.strip()
+        # Surrounding ```...``` code fence (optionally language-tagged).
+        if s.startswith("```"):
+            s = re.sub(r"^```[a-zA-Z]*\n?", "", s)
+            s = re.sub(r"\n?```$", "", s).strip()
+        # Leading label like "Translation:" / "訳文：" / "翻訳結果:".
+        s = re.sub(
+            r"^(translation|translated text|translated|翻訳|訳文|翻訳結果)\s*[:：]\s*",
+            "",
+            s,
+            flags=re.IGNORECASE,
+        )
+        # Matching surrounding quotes (ASCII or Japanese).
+        if len(s) >= 2 and s[0] in "\"'「" and s[-1] in "\"'」":
+            s = s[1:-1].strip()
+        return s
+
+    @classmethod
+    def _generate(cls, clip, instruction, max_length):
+        """Run the Gemma4 generation pipeline, mirroring ComfyUI's TextGenerate
+        node. Falls back to a minimal call signature if the installed ComfyUI
+        version's clip methods don't accept the extended keyword arguments."""
+        try:
+            tokens = clip.tokenize(
+                instruction, skip_template=False, min_length=1, thinking=False
+            )
+        except TypeError:
+            tokens = clip.tokenize(instruction)
+
+        try:
+            generated_ids = clip.generate(
+                tokens,
+                do_sample=False,
+                max_length=int(max_length),
+                temperature=0.7,
+                top_k=40,
+                top_p=0.9,
+                min_p=0.0,
+                repetition_penalty=1.0,
+                presence_penalty=0.0,
+                seed=0,
+            )
+        except TypeError:
+            generated_ids = clip.generate(tokens, max_length=int(max_length))
+
+        out = clip.decode(generated_ids)
+        return out if isinstance(out, str) else str(out)
+
+    @classmethod
+    def _output(cls, source, translated):
+        ui = {"translated": [translated]}
+        if V3_AVAILABLE:
+            return io.NodeOutput(source, translated, ui=ui)
+        return {"ui": ui, "result": (source, translated)}
+
+    @classmethod
+    def execute(cls, clip, text="", target_language="English",
+                max_length=512, unload_after=False):
+        source = text if isinstance(text, str) else ""
+        if not source.strip():
+            return cls._output(source, "")
+
+        lang = cls._LANG_NAMES.get(target_language, target_language or "English")
+        instruction = (
+            f"Translate the following text into {lang}. "
+            f"Output only the translated text, with no explanations, notes, "
+            f"labels, or quotation marks.\n\n"
+            f"Text:\n{source}"
+        )
+
+        try:
+            raw = cls._generate(clip, instruction, max_length)
+            translated = cls._clean_translation(raw)
+        except Exception as e:
+            translated = f"[Gemma Translate error] {type(e).__name__}: {e}"
+
+        if unload_after:
+            try:
+                import comfy.model_management as mm
+                mm.unload_all_models()
+                mm.soft_empty_cache()
+            except Exception:
+                pass
+
+        return cls._output(source, translated)
+
+
 # ---------------------------------------------------------------------------
 # Translation backend for the "Prompt Tabs + Translate" node.
 #
@@ -974,7 +1164,7 @@ if V3_AVAILABLE:
             return os.path.join(os.path.dirname(os.path.realpath(__file__)), "web")
 
         async def get_node_list(self):
-            return [PromptPalette_F, SimpleMultiConcatText, GetFirstWord, GetFirstWordList, PromptTabs, PromptTabsTranslate, NodeValueTemplate]
+            return [PromptPalette_F, SimpleMultiConcatText, GetFirstWord, GetFirstWordList, PromptTabs, PromptTabsTranslate, NodeValueTemplate, GemmaTranslate]
 
     async def comfy_entrypoint():
         return PromptPaletteExtension()
@@ -989,6 +1179,7 @@ NODE_CLASS_MAPPINGS = {
     "PromptTabs": PromptTabs,
     "PromptTabsTranslate": PromptTabsTranslate,
     "NodeValueTemplate": NodeValueTemplate,
+    "GemmaTranslate": GemmaTranslate,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "PromptPalette_F": "PromptPalette-F",
@@ -998,5 +1189,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PromptTabs": "Prompt Tabs",
     "PromptTabsTranslate": "Prompt Tabs + Translate",
     "NodeValueTemplate": "Node Value Template",
+    "GemmaTranslate": "Gemma Translate",
 }
 WEB_DIRECTORY = os.path.join(os.path.dirname(os.path.realpath(__file__)), "web")
