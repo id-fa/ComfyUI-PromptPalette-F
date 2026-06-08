@@ -1073,6 +1073,11 @@ class GemmaImagePrompt(BaseNodeClass):
                     ),
                     io.Int.Input("max_length", default=512, min=1, max=2048),
                     io.Boolean.Input("unload_after", default=False),
+                    io.Combo.Input(
+                        "prompt_mode",
+                        options=["Generate (recreate image)", "Edit instruction (change description)"],
+                        default="Generate (recreate image)",
+                    ),
                 ],
                 outputs=[
                     io.String.Output(display_name="positive"),
@@ -1125,6 +1130,13 @@ class GemmaImagePrompt(BaseNodeClass):
                     "default": False,
                     "tooltip": "Unload all models from VRAM after running. Affects the whole ComfyUI session's model cache (default OFF).",
                 }),
+                # Appended last to keep widgets_values index-stable for workflows
+                # saved before this option existed.
+                "prompt_mode": ("COMBO", {
+                    "options": ["Generate (recreate image)", "Edit instruction (change description)"],
+                    "default": "Generate (recreate image)",
+                    "tooltip": "Generate: a text-to-image prompt that recreates a similar image. Edit instruction: a 'change X into Y' editing instruction for image-editing models (e.g. Qwen-Image-Edit) that states both the original element and what it becomes, not just the final result.",
+                }),
             },
         }
 
@@ -1135,52 +1147,99 @@ class GemmaImagePrompt(BaseNodeClass):
 
     @classmethod
     def _build_request(cls, instruction, image_present, output_format,
-                       target_model, detail_mode):
-        """Assemble the instruction prompt sent to Gemma, adjusted by settings."""
+                       target_model, detail_mode, prompt_mode):
+        """Assemble the instruction prompt sent to Gemma, adjusted by settings.
+
+        Two modes:
+        - Generate: write a text-to-image prompt that recreates a similar image.
+        - Edit instruction: write a 'change X into Y' editing instruction for an
+          image-editing model (e.g. Qwen-Image-Edit), stating both the original
+          element and what it becomes (not just the final result)."""
+        is_edit = isinstance(prompt_mode, str) and "edit" in prompt_mode.lower()
         lines = [
             "You are an expert prompt engineer for text-to-image diffusion models."
         ]
 
-        if image_present:
+        if is_edit:
+            # --- Edit-instruction mode (for image-editing models) ---
+            if image_present:
+                lines.append(
+                    "Look carefully at the provided image and write an EDITING "
+                    "INSTRUCTION for an image-editing model (e.g. Qwen-Image-Edit) "
+                    "that transforms this image as requested below."
+                )
+            else:
+                lines.append(
+                    "Write an EDITING INSTRUCTION for an image-editing model based "
+                    "solely on the user's request below."
+                )
             lines.append(
-                "Look carefully at the provided image and write a prompt that would "
-                "generate a NEW image visually similar to it (same subject, "
-                "composition, style, colors and mood)."
+                "Describe the change explicitly: state BOTH the original element "
+                "and what it should become (e.g. 'change the red car into a blue "
+                "sports car', 'replace the daytime sky with a starry night sky', "
+                "'add a cat sitting on the sofa'). Do NOT merely describe the final "
+                "image — phrase it as an instruction of what to change from the "
+                "original."
+            )
+            lines.append(
+                "Write the instruction as concise natural-language sentences, not "
+                "a tag list."
+            )
+            lines.append(
+                "Image-editing models are instruction-based and do not use a "
+                "negative prompt — leave the negative prompt empty."
             )
         else:
-            lines.append(
-                "Write a text-to-image prompt based solely on the user's request below."
-            )
+            # --- Generation mode (text-to-image) ---
+            if image_present:
+                lines.append(
+                    "Look carefully at the provided image and write a prompt that "
+                    "would generate a NEW image visually similar to it (same "
+                    "subject, composition, style, colors and mood)."
+                )
+            else:
+                lines.append(
+                    "Write a text-to-image prompt based solely on the user's "
+                    "request below."
+                )
 
-        if output_format == "Danbooru tags":
-            lines.append(
-                "Write the prompt as a comma-separated list of Danbooru-style tags "
-                "(lowercase, words joined by underscores), ordered from most to "
-                "least important."
-            )
-        else:
-            lines.append(
-                "Write the prompt as fluent, descriptive natural-language sentences."
-            )
+            if output_format == "Danbooru tags":
+                lines.append(
+                    "Write the prompt as a comma-separated list of Danbooru-style "
+                    "tags (lowercase, words joined by underscores), ordered from "
+                    "most to least important."
+                )
+            else:
+                lines.append(
+                    "Write the prompt as fluent, descriptive natural-language "
+                    "sentences."
+                )
 
-        if target_model == "SDXL":
-            lines.append(
-                "The target model is SDXL. Also provide a concise negative prompt "
-                "listing things to avoid (e.g. low quality, blurry, bad anatomy, "
-                "extra fingers, watermark)."
-            )
-        else:
-            lines.append(
-                "The target model is FLUX, which works best with descriptive "
-                "language and does NOT use a negative prompt — leave the negative "
-                "prompt empty."
-            )
+            if target_model == "SDXL":
+                lines.append(
+                    "The target model is SDXL. Also provide a concise negative "
+                    "prompt listing things to avoid (e.g. low quality, blurry, bad "
+                    "anatomy, extra fingers, watermark)."
+                )
+            else:
+                lines.append(
+                    "The target model is FLUX, which works best with descriptive "
+                    "language and does NOT use a negative prompt — leave the "
+                    "negative prompt empty."
+                )
 
         if detail_mode == "Expand detail":
-            lines.append(
-                "Beyond any requested changes, enrich the scene with additional "
-                "fitting details and extra objects to make the image more elaborate."
-            )
+            if is_edit:
+                lines.append(
+                    "Beyond the requested change, add a few complementary edits "
+                    "that fit the scene naturally."
+                )
+            else:
+                lines.append(
+                    "Beyond any requested changes, enrich the scene with additional "
+                    "fitting details and extra objects to make the image more "
+                    "elaborate."
+                )
         else:
             faithful = " while staying faithful to the source image" if image_present else ""
             lines.append(
@@ -1190,8 +1249,9 @@ class GemmaImagePrompt(BaseNodeClass):
 
         instr = instruction.strip() if isinstance(instruction, str) else ""
         if instr:
-            lines.append(f"User's modification request: {instr}")
-        elif image_present:
+            label = "User's requested edit" if is_edit else "User's modification request"
+            lines.append(f"{label}: {instr}")
+        elif image_present and not is_edit:
             lines.append("No specific changes requested — recreate the image faithfully.")
 
         lines.append(
@@ -1301,7 +1361,7 @@ class GemmaImagePrompt(BaseNodeClass):
     def execute(cls, clip, image=None, instruction="",
                 output_format="Natural language", target_model="FLUX",
                 detail_mode="Keep as instructed", max_length=512,
-                unload_after=False):
+                unload_after=False, prompt_mode="Generate (recreate image)"):
         image_present = image is not None
         instr = instruction if isinstance(instruction, str) else ""
 
@@ -1310,7 +1370,8 @@ class GemmaImagePrompt(BaseNodeClass):
             return cls._output("", "")
 
         request = cls._build_request(
-            instr, image_present, output_format, target_model, detail_mode
+            instr, image_present, output_format, target_model, detail_mode,
+            prompt_mode,
         )
 
         try:

@@ -234,6 +234,39 @@ class TestGemmaImagePrompt(unittest.TestCase):
         self.assertIn("vision exploded", positive)
         self.assertEqual(negative, "")
 
+    def test_default_mode_is_generation(self):
+        clip = _FakeVisionClip()
+        GemmaImagePrompt.execute(clip, image=object())
+        # Generation mode asks to recreate a similar NEW image, not to edit.
+        self.assertIn("visually similar", clip.last_prompt)
+        self.assertNotIn("EDITING INSTRUCTION", clip.last_prompt)
+
+    def test_edit_instruction_mode_request(self):
+        clip = _FakeVisionClip()
+        GemmaImagePrompt.execute(
+            clip, image=object(),
+            instruction="make the car blue",
+            prompt_mode="Edit instruction (change description)")
+        p = clip.last_prompt
+        # Edit mode must ask for a change description (before -> after), not a
+        # plain recreation prompt.
+        self.assertIn("EDITING INSTRUCTION", p)
+        self.assertIn("original element", p)
+        self.assertIn("what it should become", p)
+        self.assertNotIn("visually similar", p)
+        self.assertIn("User's requested edit: make the car blue", p)
+
+    def test_edit_mode_leaves_negative_empty_instruction(self):
+        # Even with SDXL selected, edit mode tells the model not to use a
+        # negative prompt (image-editing models are instruction-based).
+        clip = _FakeVisionClip()
+        GemmaImagePrompt.execute(
+            clip, image=object(), target_model="SDXL",
+            prompt_mode="Edit instruction (change description)")
+        p = clip.last_prompt
+        self.assertIn("do not use a negative prompt", p)
+        self.assertNotIn("Also provide a concise negative prompt", p)
+
 
 class TestPromptPaletteF(unittest.TestCase):
     def test_basic_join(self):
