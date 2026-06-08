@@ -1,6 +1,6 @@
 [project]
 name = "prompt-palette-f"
-version = "2.5.10"
+version = "2.5.11"
 description = "A ComfyUI custom node pack for interactive prompt building with checkbox toggling, weight control, and prompt utilities."
 readme = "README.md"
 license = { file = "LICENSE" }
