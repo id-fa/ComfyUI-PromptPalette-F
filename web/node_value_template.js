@@ -668,7 +668,7 @@ app.registerExtension({
             }
           }
         } catch (e) {
-          console.error("[NodeValueTemplate] Error resolving template tokens:", e);
+          // console.error("[NodeValueTemplate] Error resolving template tokens:", e);
         }
         return result;
       };

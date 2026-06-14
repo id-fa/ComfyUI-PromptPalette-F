@@ -335,7 +335,7 @@ app.registerExtension({
                 };
             }
         } catch (e) {
-            console.warn("[PromptPalette_F] Failed to hook graph.clear:", e);
+            // console.warn("[PromptPalette_F] Failed to hook graph.clear:", e);
         }
 
         // Install Classic-mode widget hover tooltip handler (DOM overlay since
@@ -343,7 +343,7 @@ app.registerExtension({
         try {
             installClassicTooltipListener(app);
         } catch (e) {
-            console.warn("[PromptPalette_F] Failed to install tooltip listener:", e);
+            // console.warn("[PromptPalette_F] Failed to install tooltip listener:", e);
         }
 
         // Inject widget values for Nodes 2.0 mode (widgets are removed from the
@@ -386,21 +386,21 @@ app.registerExtension({
                                                 nodeData.inputs[name] = widget.value;
                                             }
                                         }
-                                        console.log("[PromptPalette_F] Injecting widget values for Nodes 2.0 node", nodeId);
+                                        // console.log("[PromptPalette_F] Injecting widget values for Nodes 2.0 node", nodeId);
                                     }
 
                                     // Inject preview override (both modes)
                                     const override = node._promptPalette_previewOverride;
                                     if (override && override.trim() !== "") {
                                         nodeData.inputs.preview_override = override;
-                                        console.log("[PromptPalette_F] Injecting preview override for node", nodeId);
+                                        // console.log("[PromptPalette_F] Injecting preview override for node", nodeId);
                                     }
                                 }
                             }
                         }
                     }
                 } catch (e) {
-                    console.error("[PromptPalette_F] Error injecting widget values:", e);
+                    // console.error("[PromptPalette_F] Error injecting widget values:", e);
                 }
                 return result;
             };
@@ -482,7 +482,7 @@ app.registerExtension({
                     event.stopPropagation();
                     if (event.stopImmediatePropagation) event.stopImmediatePropagation();
                 } catch (e) {
-                    console.warn("[PromptPalette_F] wheel handler error:", e);
+                    // console.warn("[PromptPalette_F] wheel handler error:", e);
                 }
             }, { capture: true, passive: false });
         }
@@ -629,7 +629,7 @@ app.registerExtension({
                 }
 
                 // We're in Classic mode (onDrawForeground is being called)
-                console.log("[PromptPalette_F] Classic mode detected (onDrawForeground called)");
+                // console.log("[PromptPalette_F] Classic mode detected (onDrawForeground called)");
                 window.__PromptPalette_F_Mode = 'classic';
 
                 // Create Classic mode buttons now that we've detected Classic mode
@@ -779,7 +779,7 @@ app.registerExtension({
                     }
                 }
             } catch (e) {
-                console.warn("[PromptPalette_F] onRemoved pending-reload capture failed:", e);
+                // console.warn("[PromptPalette_F] onRemoved pending-reload capture failed:", e);
             }
             if (origOnRemoved) origOnRemoved.apply(this, arguments);
         };
@@ -794,7 +794,7 @@ app.registerExtension({
                     if (app.graph && this.id != null) {
                         const pending = app.graph._ppPendingReload;
                         if (pending && (Date.now() - pending.time) < 500) {
-                            console.log("[PromptPalette_F] Reload Node detected - restoring initial workflow state (oldId:", pending.oldId, "→ newId:", this.id, ")");
+                            // console.log("[PromptPalette_F] Reload Node detected - restoring initial workflow state (oldId:", pending.oldId, "→ newId:", this.id, ")");
                             restoreInitialState(this, pending.savedInfo);
                             // Re-key the saved state under the new id so subsequent reloads keep working
                             if (!app.graph._ppInitialStates) app.graph._ppInitialStates = {};
@@ -814,8 +814,8 @@ app.registerExtension({
             this._promptPalette_modeDetectionTimeout = setTimeout(() => {
                 if (!this._promptPalette_setupDone) {
                     // onDrawForeground was never called - we're in Nodes 2.0 mode
-                    console.log("[PromptPalette_F] Nodes 2.0 mode detected (onDrawForeground not called)");
-                    console.log("[PromptPalette_F] Using DOM Widget UI for Nodes 2.0 mode");
+                    // console.log("[PromptPalette_F] Nodes 2.0 mode detected (onDrawForeground not called)");
+                    // console.log("[PromptPalette_F] Using DOM Widget UI for Nodes 2.0 mode");
                     window.__PromptPalette_F_Mode = 'nodes2';
 
                     // Remove Classic mode buttons if they exist (from previous Classic mode session)
@@ -1041,7 +1041,7 @@ app.registerExtension({
                     try {
                         app.graph._ppInitialStates[this.id] = JSON.parse(JSON.stringify(info));
                     } catch (e) {
-                        console.warn("[PromptPalette_F] Failed to snapshot initial state:", e);
+                        // console.warn("[PromptPalette_F] Failed to snapshot initial state:", e);
                     }
                 }
             }
@@ -3687,7 +3687,7 @@ function drawPreview(node, ctx) {
         const previewX = CONFIG.sideNodePadding;
         const previewY = node.size[1] - CONFIG.previewHeight - 10;
         ctx.fillText("Preview Error", previewX + 6, previewY + 35);
-        console.error("Preview render error:", error);
+        // console.error("Preview render error:", error);
     }
 }
 
