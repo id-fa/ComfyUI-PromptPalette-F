@@ -1550,9 +1550,10 @@ function drawCheckboxList(node, ctx, text, app) {
     // Initialize clickable areas
     node.clickableAreas = [];
 
-    // Draw group control area if groups exist
+    // Draw group control area. The global [all]/[off] buttons are shown
+    // whenever there are phrases, even when no [group] tags are used.
     let groupAreaHeight = 0;
-    if (groups.length > 0) {
+    if (text.trim() !== "") {
         groupAreaHeight = drawGroupControls(node, ctx, text, groups);
     }
     
@@ -1813,8 +1814,23 @@ function getPhraseText(line, isCommented) {
     return phraseText;
 }
 
+// Count selected (active, non-commented) phrases vs total phrase lines.
+// Empty lines and `#` description comments are not counted.
+function countSelectedPhrases(text) {
+    let selected = 0;
+    let total = 0;
+    const lines = (text || "").split("\n");
+    for (const line of lines) {
+        if (isEmptyLine(line) || isDescriptionComment(line)) continue;
+        total++;
+        if (!line.trim().startsWith("//")) selected++;
+    }
+    return { selected, total };
+}
+
 function drawGroupControls(node, ctx, text, groups) {
-    if (groups.length === 0) return 0;
+    // The [all]/[off] global toggles are always drawn here; the per-group
+    // buttons below are only drawn when [group] tags exist (groups may be empty).
 
     const widgetsHeight = getRenderedWidgetAreaBottom(node);
     const y = widgetsHeight + CONFIG.widgetSpacing;
@@ -2452,6 +2468,13 @@ const DOM_CSS = `
 .pp-preview-label.pp-edited {
     color: #ff9800;
 }
+.pp-preview-count {
+    font-size: 11px;
+    color: color-mix(in srgb, var(--descrip-text, #999) 80%, transparent);
+    margin-left: 8px;
+    margin-right: auto;
+    white-space: nowrap;
+}
 .pp-preview-btns {
     display: flex;
     gap: 4px;
@@ -2774,7 +2797,10 @@ function createDOMWidget(node, textWidget, app) {
         const toolbar = document.createElement('div');
         toolbar.className = 'pp-toolbar';
 
-        if (groups.length > 0) {
+        // Global [all]/[off] buttons: shown whenever there are phrases,
+        // even when no [group] tags are used.
+        const hasPhrases = lines.some(l => !isEmptyLine(l) && !isDescriptionComment(l));
+        if (hasPhrases) {
             // All ON button
             const allBtn = document.createElement('button');
             allBtn.className = 'pp-btn-all';
@@ -2798,7 +2824,9 @@ function createDOMWidget(node, textWidget, app) {
                 render();
             });
             toolbar.appendChild(offBtn);
+        }
 
+        if (groups.length > 0) {
             // Group buttons
             for (const groupName of groups) {
                 const status = getGroupStatus(text, groupName);
@@ -2962,6 +2990,15 @@ function createDOMWidget(node, textWidget, app) {
         label.className = 'pp-preview-label' + (hasOverride ? ' pp-edited' : '');
         label.textContent = hasOverride ? 'Preview (Edited):' : 'Preview:';
         header.appendChild(label);
+
+        // Selected-count indicator next to the label (reflects actual selection)
+        const { selected, total } = countSelectedPhrases(textWidget ? textWidget.value : "");
+        if (total > 0) {
+            const countEl = document.createElement('span');
+            countEl.className = 'pp-preview-count';
+            countEl.textContent = `${selected} selected`;
+            header.appendChild(countEl);
+        }
 
         const btns = document.createElement('div');
         btns.className = 'pp-preview-btns';
@@ -3573,6 +3610,17 @@ function drawPreview(node, ctx) {
     ctx.font = `${CONFIG.previewFontSize}px monospace`;
     ctx.textAlign = "left";
     ctx.fillText(labelText, previewX + 6, previewY + 15);
+
+    // Draw selected-count indicator after the label (reflects actual selection)
+    {
+        const textWidget = findTextWidget(node);
+        const { selected, total } = countSelectedPhrases(textWidget ? textWidget.value : "");
+        if (total > 0) {
+            const labelWidth = ctx.measureText(labelText).width;
+            ctx.fillStyle = colors.inactiveTextColor || colors.descripText;
+            ctx.fillText(`${selected} selected`, previewX + 6 + labelWidth + 8, previewY + 15);
+        }
+    }
 
     // Draw Edit button
     const editLabel = "\u270E Edit";
