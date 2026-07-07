@@ -401,20 +401,34 @@ app.registerExtension({
 
                         // Bypass pass-through: when a PromptPalette_F node is set
                         // to Bypass (node.mode === 4), ComfyUI drops it from the
-                        // prompt and severs downstream links. Because `prefix` is a
-                        // WIDGET (not an input slot), native bypass has nothing of
-                        // matching type to pass through, so `text` resolves to
+                        // prompt and severs downstream links. Native bypass would
+                        // pass a connected input through to a same-type output, but
+                        // the type/slot matching between our `prefix` input and
+                        // `text` output doesn't line up, so `text` resolves to
                         // nothing and the node contributes an empty output. Users
-                        // expect the prefix text to still flow out of `text` in this
-                        // case. So we re-insert the bypassed node with text="" (no
-                        // selection) + prefix=<value>; execute() then returns exactly
-                        // the prefix on `text` (empty prefix -> empty string, which
-                        // matches "output the prefix as-is"). Downstream `text`
-                        // inputs are rewired back to this node. node.mode is left
-                        // untouched, so the serialized/embedded workflow still shows
-                        // the node as bypassed.
+                        // expect the `prefix` value to still flow out of `text` when
+                        // bypassed. So we re-insert the bypassed node with text=""
+                        // (no selection) + prefix=<resolved>; execute() then returns
+                        // exactly the prefix on `text` (prefix + "" == prefix).
+                        //   - If `prefix` is a CONNECTED input slot, we resolve it to
+                        //     an [upstreamNodeId, slot] reference so the UPSTREAM
+                        //     node's output flows through (true passthrough) — this
+                        //     is what users wiring a string node into prefix want.
+                        //   - Otherwise we use the prefix WIDGET's typed value.
+                        // Downstream `text` inputs are rewired back to this node.
+                        // node.mode is left untouched, so the serialized/embedded
+                        // workflow still shows the node as bypassed.
                         if (app.graph && Array.isArray(app.graph._nodes)) {
                             const BYPASS_MODE = 4;
+                            const graphLinks = app.graph.links;
+                            // graph.links is a plain object in classic LiteGraph and
+                            // a Map in newer forks — support both.
+                            const getLink = (id) => {
+                                if (!graphLinks || id == null) return null;
+                                return (typeof graphLinks.get === "function")
+                                    ? graphLinks.get(id)
+                                    : graphLinks[id];
+                            };
                             for (const node of app.graph._nodes) {
                                 if (!node || node.type !== "PromptPalette_F") continue;
                                 if (node.mode !== BYPASS_MODE) continue;
@@ -427,11 +441,26 @@ app.registerExtension({
                                 const textLinks = textOut.links;
                                 if (!textLinks || textLinks.length === 0) continue; // nothing downstream
 
-                                // Resolve the prefix widget value.
-                                const prefixW = findPrefixWidget(node);
-                                let prefixVal = prefixW ? prefixW.value : "";
-                                if (typeof prefixVal !== "string") {
-                                    prefixVal = (prefixVal === undefined || prefixVal === null) ? "" : String(prefixVal);
+                                // Resolve the prefix value to inject. Prefer the
+                                // connected upstream node (true passthrough); fall
+                                // back to the widget's typed value.
+                                let prefixInject;
+                                const prefixInput = (node.inputs || []).find(inp => inp && inp.name === "prefix");
+                                if (prefixInput && prefixInput.link != null) {
+                                    const pl = getLink(prefixInput.link);
+                                    // Only reference the upstream if it survived into
+                                    // the prompt (not itself bypassed/pruned).
+                                    if (pl && output[String(pl.origin_id)]) {
+                                        prefixInject = [String(pl.origin_id), pl.origin_slot];
+                                    }
+                                }
+                                if (prefixInject === undefined) {
+                                    const prefixW = findPrefixWidget(node);
+                                    let prefixVal = prefixW ? prefixW.value : "";
+                                    if (typeof prefixVal !== "string") {
+                                        prefixVal = (prefixVal === undefined || prefixVal === null) ? "" : String(prefixVal);
+                                    }
+                                    prefixInject = prefixVal;
                                 }
 
                                 // Re-add the node so the backend executes it and
@@ -439,20 +468,11 @@ app.registerExtension({
                                 // execute() returns prefix + "" == prefix.
                                 output[idStr] = {
                                     class_type: "PromptPalette_F",
-                                    inputs: { text: "", prefix: prefixVal },
+                                    inputs: { text: "", prefix: prefixInject },
                                     _meta: { title: node.title || "PromptPalette_F" },
                                 };
 
                                 // Rewire every downstream `text` consumer back to us.
-                                const graphLinks = app.graph.links;
-                                const getLink = (id) => {
-                                    if (!graphLinks) return null;
-                                    // graph.links is a plain object in classic
-                                    // LiteGraph and a Map in newer forks.
-                                    return (typeof graphLinks.get === "function")
-                                        ? graphLinks.get(id)
-                                        : graphLinks[id];
-                                };
                                 for (const linkId of textLinks) {
                                     const link = getLink(linkId);
                                     if (!link) continue;
