@@ -398,6 +398,74 @@ app.registerExtension({
                                 }
                             }
                         }
+
+                        // Bypass pass-through: when a PromptPalette_F node is set
+                        // to Bypass (node.mode === 4), ComfyUI drops it from the
+                        // prompt and severs downstream links. Because `prefix` is a
+                        // WIDGET (not an input slot), native bypass has nothing of
+                        // matching type to pass through, so `text` resolves to
+                        // nothing and the node contributes an empty output. Users
+                        // expect the prefix text to still flow out of `text` in this
+                        // case. So we re-insert the bypassed node with text="" (no
+                        // selection) + prefix=<value>; execute() then returns exactly
+                        // the prefix on `text` (empty prefix -> empty string, which
+                        // matches "output the prefix as-is"). Downstream `text`
+                        // inputs are rewired back to this node. node.mode is left
+                        // untouched, so the serialized/embedded workflow still shows
+                        // the node as bypassed.
+                        if (app.graph && Array.isArray(app.graph._nodes)) {
+                            const BYPASS_MODE = 4;
+                            for (const node of app.graph._nodes) {
+                                if (!node || node.type !== "PromptPalette_F") continue;
+                                if (node.mode !== BYPASS_MODE) continue;
+                                const idStr = String(node.id);
+                                if (output[idStr]) continue; // already present (not actually bypassed)
+
+                                // `text` is output slot 0 (RETURN_NAMES[0]).
+                                const textOut = node.outputs && node.outputs[0];
+                                if (!textOut || (textOut.name && textOut.name !== "text")) continue;
+                                const textLinks = textOut.links;
+                                if (!textLinks || textLinks.length === 0) continue; // nothing downstream
+
+                                // Resolve the prefix widget value.
+                                const prefixW = findPrefixWidget(node);
+                                let prefixVal = prefixW ? prefixW.value : "";
+                                if (typeof prefixVal !== "string") {
+                                    prefixVal = (prefixVal === undefined || prefixVal === null) ? "" : String(prefixVal);
+                                }
+
+                                // Re-add the node so the backend executes it and
+                                // emits the prefix. text="" -> no body/selection ->
+                                // execute() returns prefix + "" == prefix.
+                                output[idStr] = {
+                                    class_type: "PromptPalette_F",
+                                    inputs: { text: "", prefix: prefixVal },
+                                    _meta: { title: node.title || "PromptPalette_F" },
+                                };
+
+                                // Rewire every downstream `text` consumer back to us.
+                                const graphLinks = app.graph.links;
+                                const getLink = (id) => {
+                                    if (!graphLinks) return null;
+                                    // graph.links is a plain object in classic
+                                    // LiteGraph and a Map in newer forks.
+                                    return (typeof graphLinks.get === "function")
+                                        ? graphLinks.get(id)
+                                        : graphLinks[id];
+                                };
+                                for (const linkId of textLinks) {
+                                    const link = getLink(linkId);
+                                    if (!link) continue;
+                                    const tgt = output[String(link.target_id)];
+                                    if (!tgt || !tgt.inputs) continue; // target itself bypassed/absent
+                                    const tgtNode = app.graph.getNodeById(link.target_id);
+                                    const tgtInput = tgtNode && tgtNode.inputs && tgtNode.inputs[link.target_slot];
+                                    if (tgtInput && tgtInput.name != null) {
+                                        tgt.inputs[tgtInput.name] = [idStr, 0];
+                                    }
+                                }
+                            }
+                        }
                     }
                 } catch (e) {
                     // console.error("[PromptPalette_F] Error injecting widget values:", e);
