@@ -407,9 +407,17 @@ function getTemplateTextArea(node) {
 // point. Attached once per textarea.
 function ensureCaretTracker(node) {
   const ta = getTemplateTextArea(node);
-  if (!ta || ta._nvtTracked) return ta;
+  if (!ta) return null;
+  // Vue can replace the textarea element on a remount; a caret recorded against
+  // the old element is meaningless, so drop it and track the new one.
+  if (node._nvtCaretEl !== ta) {
+    node._nvtCaretEl = ta;
+    node._nvtCaret = null;
+  }
+  if (ta._nvtTracked) return ta;
   ta._nvtTracked = true;
   const rec = () => {
+    if (ta._nvtSuppress) return;
     node._nvtCaret = { start: ta.selectionStart, end: ta.selectionEnd };
   };
   ["keyup", "click", "select", "input", "focus", "blur"].forEach((ev) =>
@@ -464,40 +472,54 @@ function closeTokenPicker() {
 function insertToken(node, token) {
   const widget = getTemplateWidget(node);
   if (!widget) return;
-  const ta = getTemplateTextArea(node);
+  const ta = ensureCaretTracker(node);
 
   let value = typeof widget.value === "string" ? widget.value : "";
   let start, end;
 
   if (ta) {
     value = ta.value;
-    const caret = node._nvtCaret;
-    start = caret ? caret.start : ta.selectionStart;
-    end = caret ? caret.end : ta.selectionEnd;
+    // A focused textarea has the authoritative caret; the recorded one is only
+    // needed once the picker button has blurred it.
+    const caret =
+      document.activeElement === ta
+        ? { start: ta.selectionStart, end: ta.selectionEnd }
+        : node._nvtCaret;
+    if (caret) {
+      start = caret.start;
+      end = caret.end;
+    }
   }
   if (start == null || start < 0 || start > value.length) {
     start = value.length;
     end = value.length;
   }
-  if (end == null || end < start) end = start;
+  if (end == null || end < start || end > value.length) end = start;
 
   const next = value.slice(0, start) + token + value.slice(end);
   widget.value = next;
 
   const pos = start + token.length;
-  node._nvtCaret = { start: pos, end: pos };
 
   if (ta) {
-    ta.value = next;
-    // Notify ComfyUI's own listener so widget.value stays authoritative.
-    ta.dispatchEvent(new Event("input", { bubbles: true }));
+    // Assigning `value` and focusing both fire tracked events that would
+    // otherwise record a stale caret over the one we are about to set.
+    ta._nvtSuppress = true;
     try {
-      ta.focus();
-      ta.setSelectionRange(pos, pos);
-    } catch (e) {
-      /* ignore */
+      ta.value = next;
+      // Notify ComfyUI's own listener so widget.value stays authoritative.
+      ta.dispatchEvent(new Event("input", { bubbles: true }));
+      try {
+        ta.focus();
+        ta.setSelectionRange(pos, pos);
+      } catch (e) {
+        /* ignore */
+      }
+    } finally {
+      ta._nvtSuppress = false;
     }
   }
+  node._nvtCaret = { start: pos, end: pos };
   if (typeof widget.callback === "function") {
     try {
       widget.callback(widget.value);
@@ -830,6 +852,14 @@ function addPickerButton(node) {
   const btn = document.createElement("button");
   btn.className = "nvt-pick-btn";
   btn.textContent = "🔍 ノードの値を挿入…";
+  // Runs before the button steals focus, so the still-focused textarea's caret
+  // is recorded even if the tracker had not been attached yet.
+  btn.addEventListener("pointerdown", () => {
+    const ta = ensureCaretTracker(node);
+    if (ta && document.activeElement === ta) {
+      node._nvtCaret = { start: ta.selectionStart, end: ta.selectionEnd };
+    }
+  });
   btn.addEventListener("click", (e) => {
     e.preventDefault();
     e.stopPropagation();
