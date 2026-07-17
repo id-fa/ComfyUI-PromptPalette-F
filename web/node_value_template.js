@@ -22,33 +22,134 @@ import { app } from "../../scripts/app.js";
 //   %date:FORMAT%  — current date/time formatted like SaveImage's filename_prefix
 //   %date%         — shorthand for %date:yyyy-MM-dd%
 //   %Title.widget% — current value of the named widget on the node titled Title
+// Any token may carry Smarty-style modifiers, chained with `|`:
+//   %Title.image|basename%
+//   %Title.image|basename|firstword:'_'%
 // The %Title.widget% part is split on the FIRST dot (titles rarely contain
-// dots — SaveImage splits the same way). Unresolvable tokens are left untouched
-// so the user can spot typos.
+// dots — SaveImage splits the same way). Unresolvable tokens — unknown node,
+// unknown widget, or an unknown modifier — are left untouched so the user can
+// spot typos.
 function resolveTemplate(template) {
   if (typeof template !== "string" || template.indexOf("%") === -1) {
     return template;
   }
   return template.replace(/%([^%]+)%/g, (match, inner) => {
+    const parts = splitModifiers(inner);
+    const base = parts[0].trim();
+    let value;
+
     // Date token: %date% or %date:FORMAT% (mirrors SaveImage)
-    if (inner === "date" || inner.startsWith("date:")) {
-      const fmt = inner === "date" ? "yyyy-MM-dd" : inner.slice("date:".length);
-      return formatDate(fmt, new Date());
+    if (base === "date" || base.startsWith("date:")) {
+      const fmt = base === "date" ? "yyyy-MM-dd" : base.slice("date:".length);
+      value = formatDate(fmt, new Date());
+    } else {
+      // Node reference: %Title.widget%
+      const dot = base.indexOf(".");
+      if (dot === -1) {
+        return match; // no ".property" → not a node reference, leave as-is
+      }
+      const title = base.slice(0, dot).trim();
+      const prop = base.slice(dot + 1).trim();
+      const raw = lookupWidgetValue(title, prop);
+      if (raw === undefined || raw === null) {
+        return match; // node/widget not found → leave the token visible
+      }
+      value = String(raw);
     }
 
-    // Node reference: %Title.widget%
-    const dot = inner.indexOf(".");
-    if (dot === -1) {
-      return match; // no ".property" → not a node reference, leave as-is
+    for (let i = 1; i < parts.length; i++) {
+      const next = applyModifierSpec(value, parts[i]);
+      if (next === undefined) {
+        return match; // unknown/invalid modifier → leave the token visible
+      }
+      value = next;
     }
-    const title = inner.slice(0, dot).trim();
-    const prop = inner.slice(dot + 1).trim();
-    const value = lookupWidgetValue(title, prop);
-    if (value === undefined || value === null) {
-      return match; // node/widget not found → leave the token visible
-    }
-    return String(value);
+    return value;
   });
+}
+
+// Split a token's inner text on `|`, ignoring pipes inside quoted modifier
+// arguments (e.g. `firstword:'|'`). Quotes are kept — parseModifierSpec strips
+// them — so that a bare argument containing a quote round-trips unchanged.
+function splitModifiers(inner) {
+  const parts = [];
+  let cur = "";
+  let quote = null;
+  for (const c of inner) {
+    if (quote) {
+      cur += c;
+      if (c === quote) quote = null;
+    } else if (c === "'" || c === '"') {
+      quote = c;
+      cur += c;
+    } else if (c === "|") {
+      parts.push(cur);
+      cur = "";
+    } else {
+      cur += c;
+    }
+  }
+  parts.push(cur);
+  return parts;
+}
+
+// Parse one modifier spec (`basename`, `firstword:'_'`) into {name, arg}.
+// The argument is everything after the FIRST colon; surrounding matching quotes
+// are stripped and \n / \r / \t are expanded so a separator like a tab can be
+// typed literally. `arg` is null when no colon was present.
+function parseModifierSpec(spec) {
+  const s = spec.trim();
+  const colon = s.indexOf(":");
+  if (colon === -1) {
+    return { name: s.toLowerCase(), arg: null };
+  }
+  const name = s.slice(0, colon).trim().toLowerCase();
+  let arg = s.slice(colon + 1).trim();
+  if (arg.length >= 2 && (arg[0] === "'" || arg[0] === '"') && arg[arg.length - 1] === arg[0]) {
+    arg = arg.slice(1, -1);
+  }
+  arg = arg.replace(/\\n/g, "\n").replace(/\\r/g, "\r").replace(/\\t/g, "\t");
+  return { name, arg };
+}
+
+// Apply one modifier to `value`. Returns undefined for an unknown modifier so
+// the caller can leave the whole token visible (same policy as a bad node name).
+function applyModifierSpec(value, spec) {
+  const { name, arg } = parseModifierSpec(spec);
+  switch (name) {
+    case "basename":
+      return basenameOf(value);
+    case "firstword":
+      return firstWordOf(value, arg);
+    case "trim":
+      return value.trim();
+    default:
+      return undefined;
+  }
+}
+
+// Strip directory components and the extension from a file path. Both `/` and
+// `\` count as separators (ComfyUI image widgets can carry either). A leading
+// dot is kept ("`.gitignore`" stays whole) — only a real extension is dropped.
+function basenameOf(value) {
+  let s = String(value).replace(/\\/g, "/");
+  const slash = s.lastIndexOf("/");
+  if (slash !== -1) s = s.slice(slash + 1);
+  const dot = s.lastIndexOf(".");
+  if (dot > 0) s = s.slice(0, dot);
+  return s;
+}
+
+// Return the text before the first separator. With no argument, a space OR an
+// underscore (whichever comes first) ends the word.
+function firstWordOf(value, arg) {
+  const s = String(value);
+  if (arg === null || arg === "") {
+    const m = /[ _]/.exec(s);
+    return m ? s.slice(0, m.index) : s;
+  }
+  const idx = s.indexOf(arg);
+  return idx === -1 ? s : s.slice(0, idx);
 }
 
 // Format a Date using SaveImage-style tokens. Supported (case-sensitive):
@@ -133,6 +234,35 @@ const DATE_SAMPLES = [
   "hh-mm-ss",
 ];
 
+// Modifiers offered by the picker. `arg: true` reveals the separator input.
+const MODIFIERS = [
+  {
+    name: "basename",
+    label: "basename — パスからディレクトリ名と拡張子を除く",
+    arg: false,
+  },
+  {
+    name: "firstword",
+    label: "firstword — 区切り文字までの最初の単語のみ",
+    arg: true,
+    argPlaceholder: "区切り文字（空 = スペースまたは _）",
+  },
+  { name: "trim", label: "trim — 前後の空白文字を除去", arg: false },
+];
+
+// Render a modifier back into token syntax. The argument is quoted (single
+// quotes unless it contains one) and control characters are re-escaped so the
+// token stays on one line and round-trips through parseModifierSpec().
+function formatModifier(name, arg) {
+  if (!arg) return name;
+  const escaped = arg
+    .replace(/\n/g, "\\n")
+    .replace(/\r/g, "\\r")
+    .replace(/\t/g, "\\t");
+  const q = escaped.indexOf("'") === -1 ? "'" : '"';
+  return `${name}:${q}${escaped}${q}`;
+}
+
 const MODAL_CSS = `
 .nvt-modal-backdrop {
   position: fixed; inset: 0; z-index: 10010;
@@ -190,6 +320,32 @@ const MODAL_CSS = `
 }
 .nvt-prop-row.selected .nvt-prop-val { opacity: 0.95; }
 .nvt-modal-empty { padding: 16px; text-align: center; opacity: 0.7; }
+.nvt-mod-input {
+  flex: 1 1 auto; min-width: 0;
+  background: var(--comfy-input-bg, #111); color: var(--input-text, #e0e0e0);
+  border: 1px solid var(--border-color, #444); border-radius: 4px;
+  padding: 5px 6px; font-family: monospace;
+}
+.nvt-mod-add {
+  flex: 0 0 auto;
+  background: var(--comfy-input-bg, #333); color: var(--input-text, #e0e0e0);
+  border: 1px solid var(--border-color, #444); border-radius: 4px;
+  padding: 5px 10px; cursor: pointer;
+}
+.nvt-mod-add:hover { background: rgba(255, 255, 255, 0.08); }
+.nvt-mod-chips { display: flex; flex-wrap: wrap; gap: 6px; min-height: 22px; align-items: center; }
+.nvt-mod-chips .nvt-mod-none { opacity: 0.55; }
+.nvt-mod-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: rgba(255, 255, 255, 0.09);
+  border: 1px solid var(--border-color, #444); border-radius: 10px;
+  padding: 2px 4px 2px 8px; font-family: monospace; font-size: 12px;
+}
+.nvt-mod-chip button {
+  background: transparent; border: none; color: inherit;
+  cursor: pointer; line-height: 1; padding: 0 3px; opacity: 0.7;
+}
+.nvt-mod-chip button:hover { opacity: 1; }
 .nvt-modal-footer {
   display: flex; align-items: center; gap: 10px;
   padding: 10px 14px; border-top: 1px solid var(--border-color, #444);
@@ -406,13 +562,21 @@ function openTokenPicker(node) {
   footer.appendChild(insertBtn);
   cancelBtn.addEventListener("click", closeTokenPicker);
 
-  // Shared selection state: the single currently-chosen token string (or null).
-  // Both the node-value rows and the date-format rows feed this.
-  const state = { token: null };
+  // Shared selection state. `base` is the token's inner text without the
+  // surrounding %…% (e.g. `KSampler.seed` or `date:yyyy-MM-dd`); both the node
+  // rows and the date rows feed it. `mods` are the chained modifier specs,
+  // which survive a change of base so the user can retarget without redoing them.
+  const state = { base: null, mods: [] };
+
+  function buildToken() {
+    if (!state.base) return null;
+    return `%${state.base}${state.mods.map((m) => "|" + m).join("")}%`;
+  }
 
   function updatePreview() {
-    if (state.token) {
-      preview.textContent = state.token;
+    const token = buildToken();
+    if (token) {
+      preview.textContent = token;
       insertBtn.disabled = false;
     } else {
       preview.textContent = "挿入するトークンを選択してください";
@@ -422,22 +586,23 @@ function openTokenPicker(node) {
 
   // Mark `row` as selected, clearing any previous highlight across BOTH lists
   // (node + date are mutually exclusive — one token at a time).
-  function selectRow(row, token) {
+  function selectRow(row, base) {
     panel
       .querySelectorAll(".nvt-prop-row.selected")
       .forEach((el) => el.classList.remove("selected"));
     if (row) row.classList.add("selected");
-    state.token = token;
+    state.base = base;
     updatePreview();
   }
 
   function doInsert(close) {
-    if (!state.token) return;
-    insertToken(node, state.token);
+    const token = buildToken();
+    if (!token) return;
+    insertToken(node, token);
     if (close) closeTokenPicker();
   }
 
-  function makeRow(list, nameText, valText, token) {
+  function makeRow(list, nameText, valText, base) {
     const row = document.createElement("div");
     row.className = "nvt-prop-row";
     const name = document.createElement("span");
@@ -449,10 +614,10 @@ function openTokenPicker(node) {
     val.title = valText;
     row.appendChild(name);
     row.appendChild(val);
-    row.addEventListener("click", () => selectRow(row, token));
+    row.addEventListener("click", () => selectRow(row, base));
     // Double-click = select + insert immediately (keeps the modal open).
     row.addEventListener("dblclick", () => {
-      selectRow(row, token);
+      selectRow(row, base);
       doInsert(false);
     });
     list.appendChild(row);
@@ -495,6 +660,83 @@ function openTokenPicker(node) {
   listEl.className = "nvt-prop-list";
   body.appendChild(listEl);
 
+  // ---- Modifier builder (applies to whatever base token is selected) ----
+  const modRow = document.createElement("div");
+  modRow.className = "nvt-modal-row";
+  const modLabel = document.createElement("label");
+  modLabel.textContent = "修飾子";
+  const modSelect = document.createElement("select");
+  modSelect.className = "nvt-modal-select";
+  for (const m of MODIFIERS) {
+    const opt = document.createElement("option");
+    opt.value = m.name;
+    opt.textContent = m.label;
+    modSelect.appendChild(opt);
+  }
+  const modArg = document.createElement("input");
+  modArg.className = "nvt-mod-input";
+  modArg.type = "text";
+  const modAdd = document.createElement("button");
+  modAdd.className = "nvt-mod-add";
+  modAdd.textContent = "＋ 追加";
+  modRow.appendChild(modLabel);
+  modRow.appendChild(modSelect);
+  modRow.appendChild(modArg);
+  modRow.appendChild(modAdd);
+  body.appendChild(modRow);
+
+  const chips = document.createElement("div");
+  chips.className = "nvt-mod-chips";
+  body.appendChild(chips);
+
+  // Only `firstword` takes an argument, so the input hides for the others
+  // instead of offering a field that would be ignored.
+  function syncModArg() {
+    const def = MODIFIERS.find((m) => m.name === modSelect.value);
+    const takesArg = !!def?.arg;
+    modArg.style.display = takesArg ? "" : "none";
+    modArg.placeholder = def?.argPlaceholder || "";
+    if (!takesArg) modArg.value = "";
+  }
+
+  function renderChips() {
+    chips.innerHTML = "";
+    if (state.mods.length === 0) {
+      const none = document.createElement("span");
+      none.className = "nvt-mod-none";
+      none.textContent = "（修飾子なし）";
+      chips.appendChild(none);
+      return;
+    }
+    state.mods.forEach((spec, idx) => {
+      const chip = document.createElement("span");
+      chip.className = "nvt-mod-chip";
+      const text = document.createElement("span");
+      text.textContent = "|" + spec;
+      const del = document.createElement("button");
+      del.textContent = "✕";
+      del.title = "この修飾子を削除";
+      del.addEventListener("click", () => {
+        state.mods.splice(idx, 1);
+        renderChips();
+        updatePreview();
+      });
+      chip.appendChild(text);
+      chip.appendChild(del);
+      chips.appendChild(chip);
+    });
+  }
+
+  modSelect.addEventListener("change", syncModArg);
+  modAdd.addEventListener("click", () => {
+    state.mods.push(formatModifier(modSelect.value, modArg.value));
+    modArg.value = "";
+    renderChips();
+    updatePreview();
+  });
+  syncModArg();
+  renderChips();
+
   function clearList() {
     listEl.innerHTML = "";
     selectRow(null, null); // switching choice drops the previous selection
@@ -511,9 +753,9 @@ function openTokenPicker(node) {
     clearList();
     const now = new Date();
     DATE_SAMPLES.forEach((fmt, idx) => {
-      const token = `%date:${fmt}%`;
-      const row = makeRow(listEl, token, "→ " + formatDate(fmt, now), token);
-      if (idx === 0) selectRow(row, token); // pre-select the first for convenience
+      const base = `date:${fmt}`;
+      const row = makeRow(listEl, `%${base}%`, "→ " + formatDate(fmt, now), base);
+      if (idx === 0) selectRow(row, base); // pre-select the first for convenience
     });
   }
 
@@ -530,9 +772,9 @@ function openTokenPicker(node) {
       return;
     }
     widgets.forEach((w, idx) => {
-      const token = `%${title}.${w.name}%`;
-      const row = makeRow(listEl, w.name, formatValue(w.value), token);
-      if (idx === 0) selectRow(row, token); // pre-select the first for convenience
+      const base = `${title}.${w.name}`;
+      const row = makeRow(listEl, w.name, formatValue(w.value), base);
+      if (idx === 0) selectRow(row, base); // pre-select the first for convenience
     });
   }
 

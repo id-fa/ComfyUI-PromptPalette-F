@@ -357,6 +357,30 @@ output_%date:yyyy-MM-dd%/%KSampler.seed%
 - トークン以外の文字（`-` `_` `/` など）はそのまま残ります。
 - 展開は Queue 実行時のブラウザのローカル時刻を使用します。
 
+## 修飾子 `|modifier`
+
+Smarty のように、トークンの値へ修飾子を適用できます。`|` で区切って記述し、複数連結すると左から順に適用されます。日付トークンにも使えます。
+
+```
+%LoadImage.image|basename%
+→ Cat_photo_01          （値が sub/dir/Cat_photo_01.png の場合）
+
+%LoadImage.image|basename|firstword:'_'%
+→ Cat
+```
+
+| 修飾子 | 意味 |
+| --- | --- |
+| `basename` | ファイルパスからディレクトリ名と拡張子を除きます（`/` `\` の両方に対応） |
+| `firstword:'_'` | `_` を区切り文字として、最初の単語のみを抽出します |
+| `firstword:' '` | スペースを区切り文字として、最初の単語のみを抽出します |
+| `firstword` | 区切り文字を省略すると、**スペースまたは `_`**（先に現れた方）で区切ります |
+| `trim` | 前後の空白文字を除去します |
+
+- 区切り文字は `'…'` または `"…"` で囲みます。`\n` / `\r` / `\t` はエスケープ表記のまま書けます。
+- 区切り文字が値の中に見つからない場合は、値全体をそのまま返します。
+- 未知の修飾子を書いた場合は、タイプミスに気づけるようトークン全体を `%...%` のまま残します。
+
 ## 値の挿入ヘルパー（モーダル）
 
 トークンを手打ちしなくても、ノード上の **「🔍 ノードの値を挿入…」** ボタンからモーダルを開いて挿入できます。
@@ -366,7 +390,8 @@ output_%date:yyyy-MM-dd%/%KSampler.seed%
    - **ノードタイトルを選択** → そのノードのウィジェット名と現在値の一覧
    - **「📅 日付フォーマット」を選択** → `%date:…%` のサンプル（`yyyy-MM-dd`、`yyyy-MM-dd_hh-mm-ss` など）とライブプレビューの一覧
 3. 挿入したい行をクリックして選択（ダブルクリックで即挿入＆モーダル維持）
-4. **「挿入」ボタン**で、`template` のカーソル位置にトークンを挿入
+4. 必要なら **「修飾子」** のプルダウンから修飾子を選び、**「＋ 追加」** で連結します（`firstword` のときだけ区切り文字の入力欄が表示されます）。追加した修飾子はチップとして並び、`✕` で個別に削除できます。プレビュー欄には完成形のトークンが表示されます
+5. **「挿入」ボタン**で、`template` のカーソル位置にトークンを挿入
 
 参照できるノードが無くても、プルダウンの「日付フォーマット」項目は常に利用できます。
 
@@ -740,6 +765,30 @@ output_%date:yyyy-MM-dd%/%KSampler.seed%
 - Any non-token characters (`-`, `_`, `/`, etc.) are kept verbatim.
 - The value uses the browser's local time at queue time.
 
+### Modifiers `|modifier`
+
+Smarty-style modifiers post-process a token's value. Separate them with `|`; chained modifiers apply left to right. They work on date tokens too.
+
+```
+%LoadImage.image|basename%
+→ Cat_photo_01          (when the value is sub/dir/Cat_photo_01.png)
+
+%LoadImage.image|basename|firstword:'_'%
+→ Cat
+```
+
+| Modifier | Meaning |
+| --- | --- |
+| `basename` | Strip directory components and the extension from a file path (both `/` and `\` count as separators) |
+| `firstword:'_'` | Keep only the first word, using `_` as the separator |
+| `firstword:' '` | Keep only the first word, using a space as the separator |
+| `firstword` | With no argument, a space **or** an underscore (whichever comes first) ends the word |
+| `trim` | Strip leading/trailing whitespace |
+
+- Quote the separator with `'…'` or `"…"`. `\n` / `\r` / `\t` may be written as escape sequences.
+- If the separator isn't found in the value, the whole value is returned unchanged.
+- An unknown modifier leaves the entire token as `%...%` so you can spot the typo.
+
 ### Insert helper (modal)
 
 Instead of typing tokens by hand, click the **"🔍 ノードの値を挿入… / Insert token"** button on the node to open a modal.
@@ -749,7 +798,8 @@ Instead of typing tokens by hand, click the **"🔍 ノードの値を挿入… 
    - **A node title** → that node's widget names and current values.
    - **The date-format entry** → `%date:…%` samples (`yyyy-MM-dd`, `yyyy-MM-dd_hh-mm-ss`, etc.) with live previews.
 3. Click a row to select it (double-click inserts immediately and keeps the modal open).
-4. Click **Insert** to drop the token at the caret position in `template`.
+4. Optionally pick a modifier from the **修飾子 (modifier)** dropdown and click **＋ 追加** to chain it (the separator field only appears for `firstword`). Added modifiers show up as chips you can remove individually with `✕`, and the preview shows the finished token.
+5. Click **Insert** to drop the token at the caret position in `template`.
 
 The date-format entry is always available even when there are no other nodes to reference. The node widget list is only expanded for the one node you pick, so it stays fast even with many nodes in the graph. Works in both Classic and Nodes 2.0 modes.
 
