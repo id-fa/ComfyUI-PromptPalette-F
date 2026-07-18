@@ -142,23 +142,49 @@ class TestGemmaTranslate(unittest.TestCase):
 
 class _FakeVisionClip:
     """Stand-in for a Gemma4 vision CLIP. Records the prompt and whether an image
-    was passed, and returns a canned POSITIVE/NEGATIVE generation."""
+    or a video was passed, and returns a canned POSITIVE/NEGATIVE generation.
+
+    Exposes a `tokenizer.tokenize_with_weights` whose signature declares an
+    explicit `video` parameter so GemmaImagePrompt._tokenizer_accepts routes the
+    video batch through the native video= path (as it would for Gemma4)."""
 
     def __init__(self, raw="POSITIVE: a cat sitting on a sofa\nNEGATIVE: blurry, lowres"):
         self.raw = raw
         self.last_prompt = None
         self.got_image = False
+        self.got_video = False
+        self.tokenizer = self  # so _tokenizer_accepts can introspect the signature
 
-    def tokenize(self, prompt, image=None, **kwargs):
+    def tokenize(self, prompt, image=None, video=None, **kwargs):
         self.last_prompt = prompt
         self.got_image = image is not None
+        self.got_video = video is not None
         return {"prompt": prompt}
+
+    def tokenize_with_weights(self, text, image=None, video=None, **kwargs):
+        # Only the SIGNATURE is read (by _tokenizer_accepts); never called.
+        raise NotImplementedError
 
     def generate(self, tokens, **kwargs):
         return [1, 2, 3]
 
     def decode(self, ids):
         return self.raw
+
+
+class _FrameBatch:
+    """Tiny stand-in for an IMAGE batch tensor: has a `.shape` (frames, H, W, C)
+    and supports list-index selection like video[[0, 2, 4]]."""
+
+    def __init__(self, frames):
+        self.frames = list(frames)
+
+    @property
+    def shape(self):
+        return (len(self.frames), 2, 2, 3)
+
+    def __getitem__(self, idx):
+        return _FrameBatch([self.frames[i] for i in idx])
 
 
 class TestGemmaImagePrompt(unittest.TestCase):
@@ -266,6 +292,80 @@ class TestGemmaImagePrompt(unittest.TestCase):
         p = clip.last_prompt
         self.assertIn("do not use a negative prompt", p)
         self.assertNotIn("Also provide a concise negative prompt", p)
+
+    def test_video_ltxv_mode_request(self):
+        clip = _FakeVisionClip(
+            raw="POSITIVE: a woman turns toward the camera as it pushes in\nNEGATIVE:")
+        out = GemmaImagePrompt.execute(
+            clip, video=object(),
+            prompt_mode="Video description (LTXV)")
+        p = clip.last_prompt
+        # LTXV mode targets a text-to-video model with an LTX-2-style request.
+        self.assertIn("text-to-video", p.lower())
+        self.assertIn("LTXV", p)
+        self.assertIn("present tense", p.lower())
+        self.assertIn("camera", p.lower())
+        self.assertIn("chronological", p.lower())
+        # Video models get a positive-only prompt.
+        self.assertIn("leave the negative prompt empty", p.lower())
+        self.assertNotIn("visually similar", p)
+        self.assertNotIn("EDITING INSTRUCTION", p)
+        positive, negative = out["result"]
+        self.assertEqual(negative, "")
+
+    def test_video_routed_through_video_kwarg(self):
+        clip = _FakeVisionClip()
+        GemmaImagePrompt.execute(
+            clip, video=object(),
+            prompt_mode="Video description (LTXV)")
+        # A tokenizer with a native video= param (Gemma4-like) receives the
+        # frames as video=, not image=.
+        self.assertTrue(clip.got_video)
+        self.assertFalse(clip.got_image)
+
+    def test_video_falls_back_to_image_kwarg(self):
+        # A tokenizer WITHOUT a native video= param (Qwen3-VL-like: only image=)
+        # receives the frame batch as image=.
+        class _NoVideoClip(_FakeVisionClip):
+            def tokenize_with_weights(self, text, image=None, **kwargs):
+                raise NotImplementedError
+
+        clip = _NoVideoClip()
+        GemmaImagePrompt.execute(
+            clip, video=object(),
+            prompt_mode="Video description (LTXV)")
+        self.assertTrue(clip.got_image)
+        self.assertFalse(clip.got_video)
+
+    def test_ltxv_without_video_uses_instruction(self):
+        clip = _FakeVisionClip(raw="POSITIVE: a car drives down a rainy street\nNEGATIVE:")
+        GemmaImagePrompt.execute(
+            clip, image=None, video=None,
+            instruction="a car driving in the rain",
+            prompt_mode="Video description (LTXV)")
+        p = clip.last_prompt
+        self.assertIn("text-to-video", p.lower())
+        self.assertIn("User's requested motion/scene: a car driving in the rain", p)
+
+    def test_video_takes_precedence_over_image(self):
+        clip = _FakeVisionClip()
+        GemmaImagePrompt.execute(
+            clip, image=object(), video=object(),
+            prompt_mode="Video description (LTXV)")
+        # When both are wired, the video path wins.
+        self.assertTrue(clip.got_video)
+        self.assertFalse(clip.got_image)
+
+    def test_sample_frames_caps_count(self):
+        # More frames than max_frames → uniformly sampled down to max_frames.
+        sampled = GemmaImagePrompt._sample_frames(_FrameBatch(range(30)), 8)
+        self.assertEqual(sampled.shape[0], 8)
+        # Fewer frames than max_frames → returned unchanged.
+        small = GemmaImagePrompt._sample_frames(_FrameBatch(range(5)), 8)
+        self.assertEqual(small.shape[0], 5)
+        # Non-tensor sentinel → passthrough (no crash).
+        sentinel = object()
+        self.assertIs(GemmaImagePrompt._sample_frames(sentinel, 8), sentinel)
 
 
 class TestPromptPaletteF(unittest.TestCase):

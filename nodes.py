@@ -1075,9 +1075,17 @@ class GemmaImagePrompt(BaseNodeClass):
                     io.Boolean.Input("unload_after", default=False),
                     io.Combo.Input(
                         "prompt_mode",
-                        options=["Generate (recreate image)", "Edit instruction (change description)"],
+                        options=[
+                            "Generate (recreate image)",
+                            "Edit instruction (change description)",
+                            "Video description (LTXV)",
+                        ],
                         default="Generate (recreate image)",
                     ),
+                    # Appended last (after prompt_mode) to keep widgets_values
+                    # index-stable for workflows saved before these existed.
+                    io.Image.Input("video", optional=True),
+                    io.Int.Input("max_frames", default=8, min=1, max=64),
                 ],
                 outputs=[
                     io.String.Output(display_name="positive"),
@@ -1133,9 +1141,27 @@ class GemmaImagePrompt(BaseNodeClass):
                 # Appended last to keep widgets_values index-stable for workflows
                 # saved before this option existed.
                 "prompt_mode": ("COMBO", {
-                    "options": ["Generate (recreate image)", "Edit instruction (change description)"],
+                    "options": [
+                        "Generate (recreate image)",
+                        "Edit instruction (change description)",
+                        "Video description (LTXV)",
+                    ],
                     "default": "Generate (recreate image)",
-                    "tooltip": "Generate: a text-to-image prompt that recreates a similar image. Edit instruction: a 'change X into Y' editing instruction for image-editing models (e.g. Qwen-Image-Edit) that states both the original element and what it becomes, not just the final result.",
+                    "tooltip": "Generate: a text-to-image prompt that recreates a similar image. Edit instruction: a 'change X into Y' editing instruction for image-editing models (e.g. Qwen-Image-Edit) that states both the original element and what it becomes, not just the final result. Video description (LTXV): a single flowing text-to-video prompt (present tense, camera moves, chronological motion) for LTX-2 / LTXV — pair it with the video input.",
+                }),
+                # Video content prompt generation. Appended after prompt_mode so
+                # existing saves keep their widget/slot indices. In ComfyUI a
+                # "video" is an IMAGE batch of frames (e.g. from VHS Load Video);
+                # Gemma4's tokenizer has a native video= path, Qwen3-VL falls back
+                # to treating the frames as multiple stills.
+                "video": ("IMAGE", {
+                    "tooltip": "Video frames to analyze (an IMAGE batch, e.g. from a Load Video node). When connected, use prompt_mode 'Video description (LTXV)' to describe the motion/scene for a text-to-video model.",
+                }),
+                "max_frames": ("INT", {
+                    "default": 8,
+                    "min": 1,
+                    "max": 64,
+                    "tooltip": "Maximum number of frames uniformly sampled from the video before sending to the model (caps VRAM/context; especially important for Qwen3-VL, which treats every frame as a separate still).",
                 }),
             },
         }
@@ -1147,15 +1173,26 @@ class GemmaImagePrompt(BaseNodeClass):
 
     @classmethod
     def _build_request(cls, instruction, image_present, output_format,
-                       target_model, detail_mode, prompt_mode):
+                       target_model, detail_mode, prompt_mode,
+                       video_present=False):
         """Assemble the instruction prompt sent to Gemma, adjusted by settings.
 
-        Two modes:
+        Three modes:
         - Generate: write a text-to-image prompt that recreates a similar image.
         - Edit instruction: write a 'change X into Y' editing instruction for an
           image-editing model (e.g. Qwen-Image-Edit), stating both the original
-          element and what it becomes (not just the final result)."""
-        is_edit = isinstance(prompt_mode, str) and "edit" in prompt_mode.lower()
+          element and what it becomes (not just the final result).
+        - Video description (LTXV): write a single flowing text-to-video prompt
+          (present tense, camera moves, chronological motion) for LTX-2 / LTXV."""
+        mode = prompt_mode.lower() if isinstance(prompt_mode, str) else ""
+        is_video = "video" in mode
+        is_edit = (not is_video) and "edit" in mode
+        media_present = image_present or video_present
+
+        if is_video:
+            return cls._build_video_request(
+                instruction, image_present, video_present, detail_mode)
+
         lines = [
             "You are an expert prompt engineer for text-to-image diffusion models."
         ]
@@ -1262,6 +1299,96 @@ class GemmaImagePrompt(BaseNodeClass):
         )
         return "\n".join(lines)
 
+    @classmethod
+    def _build_video_request(cls, instruction, image_present, video_present,
+                             detail_mode):
+        """Assemble an LTX-2 / LTXV-style text-to-video request prompt.
+
+        LTX-2 prompts work best as a single flowing paragraph in the present
+        tense, describing the literal chronological motion, explicit camera
+        work, and the scene (shot type, lighting, color, texture, atmosphere).
+        Video models are prompted with positive description only, so the
+        negative prompt is left empty."""
+        lines = [
+            "You are an expert prompt engineer for text-to-video diffusion "
+            "models such as LTX-2 / LTXV."
+        ]
+
+        if video_present:
+            lines.append(
+                "Watch the provided video carefully and write a prompt that "
+                "describes what happens in it so a text-to-video model can "
+                "recreate a visually and temporally similar clip."
+            )
+        elif image_present:
+            lines.append(
+                "Look at the provided image and write a text-to-video prompt "
+                "that brings the scene to life with plausible, natural motion."
+            )
+        else:
+            lines.append(
+                "Write a text-to-video prompt based solely on the user's "
+                "request below."
+            )
+
+        lines.append(
+            "Write ONE flowing paragraph of 4 to 8 sentences in the present "
+            "tense. Do NOT use a comma-separated tag list."
+        )
+        lines.append(
+            "Describe, in chronological order, the literal motion of the "
+            "subjects and how the scene changes over time (e.g. 'she shifts her "
+            "weight to her left foot and turns her head slowly toward the "
+            "camera'), not abstract impressions."
+        )
+        lines.append(
+            "Explicitly describe the camera work with cinematography language "
+            "(for example: static frame, pans across, tracks, follows, pushes "
+            "in, pulls back, tilts up, circles around, handheld, overhead view) "
+            "and state when the view shifts and how the subject looks after the "
+            "move."
+        )
+        lines.append(
+            "Set the scene with the shot type/scale, lighting, color palette, "
+            "surface textures, and atmosphere."
+        )
+        lines.append(
+            "Text-to-video models are prompted with positive description only "
+            "— leave the negative prompt empty."
+        )
+
+        if detail_mode == "Expand detail":
+            lines.append(
+                "Enrich the clip with additional fitting background action and "
+                "secondary motion to make it more dynamic and cinematic."
+            )
+        else:
+            faithful = " while staying faithful to the source" if (
+                video_present or image_present) else ""
+            lines.append(
+                "Keep the motion and scene grounded in what is shown or "
+                "requested" + faithful +
+                "; do not invent unrelated events."
+            )
+
+        instr = instruction.strip() if isinstance(instruction, str) else ""
+        if instr:
+            lines.append(f"User's requested motion/scene: {instr}")
+        elif video_present:
+            lines.append(
+                "No specific changes requested — describe the video's motion "
+                "and scene faithfully."
+            )
+
+        lines.append(
+            "Output ONLY the prompt — no explanations, no commentary, no "
+            "markdown, no code fences. Respond in EXACTLY this format and "
+            "nothing else:\n"
+            "POSITIVE: <the positive prompt>\n"
+            "NEGATIVE: <leave blank>"
+        )
+        return "\n".join(lines)
+
     @staticmethod
     def _clean(s):
         """Strip code fences and matching surrounding quotes from one field."""
@@ -1310,19 +1437,69 @@ class GemmaImagePrompt(BaseNodeClass):
             negative = ""
         return positive, negative
 
+    @staticmethod
+    def _tokenizer_accepts(clip, name):
+        """True if the underlying tokenizer's tokenize_with_weights declares an
+        explicit parameter called `name` (e.g. Gemma4 has a real `video=`).
+        Used so we don't hand `video=` to a tokenizer that would silently drop
+        it into **kwargs (e.g. Qwen3-VL, which only understands image=)."""
+        try:
+            import inspect
+            fn = clip.tokenizer.tokenize_with_weights
+            return name in inspect.signature(fn).parameters
+        except Exception:
+            return False
+
+    @staticmethod
+    def _sample_frames(video, max_frames):
+        """Uniformly sample at most max_frames frames from an IMAGE batch tensor
+        (shape [frames, H, W, C]). Caps VRAM/context before the frames reach the
+        model. Defensive: returns the input unchanged if it isn't an indexable
+        batch (so plain sentinels used in tests pass straight through)."""
+        try:
+            n = int(video.shape[0])
+        except Exception:
+            return video
+        try:
+            m = max(1, int(max_frames))
+        except Exception:
+            m = 8
+        if n <= m:
+            return video
+        step = n / float(m)
+        idx = [min(n - 1, int(i * step)) for i in range(m)]
+        try:
+            return video[idx]
+        except Exception:
+            return video
+
     @classmethod
-    def _generate(cls, clip, prompt, image, max_length):
-        """Run Gemma generation, passing the image to the multimodal tokenizer
-        when present. Each call has a TypeError fallback to a minimal signature
-        for older ComfyUI builds."""
-        if image is not None:
-            try:
-                tokens = clip.tokenize(
-                    prompt, image=image, skip_template=False,
-                    min_length=1, thinking=False,
-                )
-            except TypeError:
-                tokens = clip.tokenize(prompt, image=image)
+    def _tokenize_visual(cls, clip, prompt, key, media):
+        """Tokenize with a single visual kwarg (`image` or `video`), with a
+        TypeError fallback to a minimal signature for older ComfyUI builds."""
+        kwargs = {key: media}
+        try:
+            return clip.tokenize(
+                prompt, skip_template=False, min_length=1, thinking=False,
+                **kwargs,
+            )
+        except TypeError:
+            return clip.tokenize(prompt, **kwargs)
+
+    @classmethod
+    def _generate(cls, clip, prompt, image, video, max_length):
+        """Run Gemma generation, passing the visual input to the multimodal
+        tokenizer when present. Video (an IMAGE batch of frames) is sent through
+        the tokenizer's native video= path when the tokenizer supports it
+        (Gemma4), otherwise as image= (Qwen3-VL splits the batch into per-frame
+        stills). Video takes precedence over a still image when both are wired.
+        Each call has a TypeError fallback to a minimal signature for older
+        ComfyUI builds."""
+        if video is not None:
+            key = "video" if cls._tokenizer_accepts(clip, "video") else "image"
+            tokens = cls._tokenize_visual(clip, prompt, key, video)
+        elif image is not None:
+            tokens = cls._tokenize_visual(clip, prompt, "image", image)
         else:
             try:
                 tokens = clip.tokenize(
@@ -1361,21 +1538,30 @@ class GemmaImagePrompt(BaseNodeClass):
     def execute(cls, clip, image=None, instruction="",
                 output_format="Natural language", target_model="FLUX",
                 detail_mode="Keep as instructed", max_length=512,
-                unload_after=False, prompt_mode="Generate (recreate image)"):
+                unload_after=False, prompt_mode="Generate (recreate image)",
+                video=None, max_frames=8):
         image_present = image is not None
+        video_present = video is not None
         instr = instruction if isinstance(instruction, str) else ""
 
-        # Nothing to work with: no image AND no instruction text.
-        if not image_present and not instr.strip():
+        # Nothing to work with: no image, no video AND no instruction text.
+        if not image_present and not video_present and not instr.strip():
             return cls._output("", "")
 
         request = cls._build_request(
             instr, image_present, output_format, target_model, detail_mode,
-            prompt_mode,
+            prompt_mode, video_present=video_present,
         )
 
         try:
-            raw = cls._generate(clip, request, image if image_present else None, max_length)
+            sampled_video = (
+                cls._sample_frames(video, max_frames) if video_present else None
+            )
+            raw = cls._generate(
+                clip, request,
+                image if image_present else None,
+                sampled_video, max_length,
+            )
             positive, negative = cls._parse_pos_neg(raw)
         except Exception as e:
             positive = f"[Gemma Image Prompt error] {type(e).__name__}: {e}"
