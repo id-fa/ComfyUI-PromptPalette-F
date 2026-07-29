@@ -1048,6 +1048,18 @@ class GemmaImagePrompt(BaseNodeClass):
     if V3_AVAILABLE:
         @classmethod
         def define_schema(cls):
+            # "video" accepts BOTH an IMAGE frame batch (VHS-style loaders,
+            # which output IMAGE) and a VIDEO object (ComfyUI core "Load Video",
+            # which outputs VIDEO / VideoInput). io.MultiType renders the slot
+            # with the union type "IMAGE,VIDEO" so either can be wired.
+            # MultiType is a newer comfy_api addition — fall back to IMAGE-only
+            # on older builds.
+            try:
+                video_input = io.MultiType.Input(
+                    "video", types=[io.Image, io.Video], optional=True,
+                )
+            except Exception:
+                video_input = io.Image.Input("video", optional=True)
             return io.Schema(
                 node_id="GemmaImagePrompt",
                 display_name="Gemma Image Prompt",
@@ -1084,7 +1096,7 @@ class GemmaImagePrompt(BaseNodeClass):
                     ),
                     # Appended last (after prompt_mode) to keep widgets_values
                     # index-stable for workflows saved before these existed.
-                    io.Image.Input("video", optional=True),
+                    video_input,
                     io.Int.Input("max_frames", default=8, min=1, max=64),
                 ],
                 outputs=[
@@ -1150,12 +1162,16 @@ class GemmaImagePrompt(BaseNodeClass):
                     "tooltip": "Generate: a text-to-image prompt that recreates a similar image. Edit instruction: a 'change X into Y' editing instruction for image-editing models (e.g. Qwen-Image-Edit) that states both the original element and what it becomes, not just the final result. Video description (LTXV): a single flowing text-to-video prompt (present tense, camera moves, chronological motion) for LTX-2 / LTXV — pair it with the video input.",
                 }),
                 # Video content prompt generation. Appended after prompt_mode so
-                # existing saves keep their widget/slot indices. In ComfyUI a
-                # "video" is an IMAGE batch of frames (e.g. from VHS Load Video);
+                # existing saves keep their widget/slot indices. Accepts EITHER
+                # an IMAGE batch of frames (VHS-style loaders output IMAGE) or a
+                # VIDEO object (ComfyUI core "Load Video" outputs VIDEO) — the
+                # comma union type is resolved by both the frontend's connection
+                # check and the backend's validate_node_input. A VIDEO object is
+                # converted to a frame batch by _extract_video_frames().
                 # Gemma4's tokenizer has a native video= path, Qwen3-VL falls back
                 # to treating the frames as multiple stills.
-                "video": ("IMAGE", {
-                    "tooltip": "Video frames to analyze (an IMAGE batch, e.g. from a Load Video node). When connected, use prompt_mode 'Video description (LTXV)' to describe the motion/scene for a text-to-video model.",
+                "video": ("IMAGE,VIDEO", {
+                    "tooltip": "Video to analyze: either a VIDEO output (e.g. ComfyUI's Load Video) or an IMAGE batch of frames (e.g. VHS Load Video). When connected, use prompt_mode 'Video description (LTXV)' to describe the motion/scene for a text-to-video model.",
                 }),
                 "max_frames": ("INT", {
                     "default": 8,
@@ -1451,6 +1467,26 @@ class GemmaImagePrompt(BaseNodeClass):
             return False
 
     @staticmethod
+    def _extract_video_frames(video):
+        """Normalize the `video` input to an IMAGE frame batch.
+
+        The slot accepts a union type ("IMAGE,VIDEO"), so it can receive either:
+          * an IMAGE batch tensor [frames, H, W, C] (VHS-style loaders) — used
+            as-is, or
+          * a VIDEO object (ComfyUI core "Load Video" → comfy_api VideoInput) —
+            its frames are pulled out via get_components().images.
+        Note that get_components() materializes the WHOLE video in memory;
+        _sample_frames() then caps it to max_frames before it reaches the model.
+        Returns None if a VIDEO object yields no frames."""
+        if video is None:
+            return None
+        getter = getattr(video, "get_components", None)
+        if callable(getter):
+            components = getter()
+            return getattr(components, "images", None)
+        return video
+
+    @staticmethod
     def _sample_frames(video, max_frames):
         """Uniformly sample at most max_frames frames from an IMAGE batch tensor
         (shape [frames, H, W, C]). Caps VRAM/context before the frames reach the
@@ -1554,8 +1590,10 @@ class GemmaImagePrompt(BaseNodeClass):
         )
 
         try:
+            frames = cls._extract_video_frames(video) if video_present else None
             sampled_video = (
-                cls._sample_frames(video, max_frames) if video_present else None
+                cls._sample_frames(frames, max_frames)
+                if frames is not None else None
             )
             raw = cls._generate(
                 clip, request,

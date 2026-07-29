@@ -287,7 +287,7 @@ Nodes 2.0モードでは編集モード時の設定行に省略表示されま�
 
 入力画像をGemma4に「見せて」、それに似た画像を生成するための text-to-image プロンプトを出力するノードです。修正指示を受け付けて反映し、想定する生成モデルや出力形式に合わせてプロンプトを調整します。画像認識→生成は、`Gemma Translate` と同様に**ワークフロー実行（Queue Prompt）時**に走ります。
 
-> 🎬 **動画→動画プロンプト（LTXV / LTX-2 用）**: `video` 入力に動画フレーム（IMAGEバッチ）を接続し、`prompt_mode` を `Video description (LTXV)` にすると、動画内容を解析して **LTX-2 / LTXV 向けの text-to-video プロンプト**を生成します。Gemma4のトークナイザにはネイティブの `video=` 経路があり、フレームを時系列として処理します（Qwen3-VLの場合は `video=` が無いため各フレームを個別の静止画として扱うフォールバックになります）。`max_frames` で送るフレーム数を制限できます。
+> 🎬 **動画→動画プロンプト（LTXV / LTX-2 用）**: `video` 入力に動画を接続し（ComfyUI標準の `Load Video` の **VIDEO** 出力、またはVHS系ローダーの **IMAGE**（フレームバッチ）出力のどちらでも可）、`prompt_mode` を `Video description (LTXV)` にすると、動画内容を解析して **LTX-2 / LTXV 向けの text-to-video プロンプト**を生成します。Gemma4のトークナイザにはネイティブの `video=` 経路があり、フレームを時系列として処理します（Qwen3-VLの場合は `video=` が無いため各フレームを個別の静止画として扱うフォールバックになります）。`max_frames` で送るフレーム数を制限できます。
 
 > 📌 **画像入力なしでも動作**します。その場合は「指示テキストのみ」から画像生成プロンプトを組み立てます（画像認識は行いません）。画像も指示も両方空の場合は空文字を出力します。
 >
@@ -301,7 +301,7 @@ Nodes 2.0モードでは編集モード時の設定行に省略表示されま�
 | --- | --- | --- |
 | `clip` | CLIP | `CLIPLoader` で読み込んだ vision対応 Gemma4 エンコーダ（必須） |
 | `image` | IMAGE | 認識させる画像（任意）。接続すると「似た画像」を生成するプロンプトを作ります。未接続なら指示テキストのみで生成します |
-| `video` | IMAGE | 認識させる**動画フレーム**（任意）。ComfyUIでは動画は「IMAGEのフレームバッチ」として扱われます（例：Load Video系ノードのIMAGE出力）。接続して `prompt_mode` を `Video description (LTXV)` にすると、**LTX-2 / LTXV 向けの動画内容説明プロンプト**を出力します |
+| `video` | VIDEO / IMAGE | 認識させる**動画**（任意）。ComfyUI標準 `Load Video` の **VIDEO** 出力と、VHS系ローダーの **IMAGE**（フレームバッチ）出力の**どちらでも接続できます**（VIDEOの場合はノード内部でフレームに展開します）。接続して `prompt_mode` を `Video description (LTXV)` にすると、**LTX-2 / LTXV 向けの動画内容説明プロンプト**を出力します |
 | `instruction` | STRING | 内容修正指示（自由入力。例：`夜にして、雨を降らせる`）。画像認識の結果に上乗せして反映します |
 
 設定:
@@ -719,7 +719,7 @@ Outputs:
 
 Shows an input image to Gemma4 and writes a text-to-image prompt that would generate a visually similar image. It applies your free-form modification instructions and adjusts the prompt for the intended generation model and output style. As with `Gemma Translate`, the analysis/generation runs **when you Queue Prompt**.
 
-> 🎬 **Video → video prompt (for LTXV / LTX-2):** Wire video frames (an IMAGE batch) into the `video` input and set `prompt_mode` to `Video description (LTXV)`, and the node analyzes the clip and writes a **text-to-video prompt for LTX-2 / LTXV**. Gemma4's tokenizer has a native `video=` path that processes the frames as a temporal sequence (Qwen3-VL has no `video=` kwarg, so it falls back to treating each frame as a separate still). Use `max_frames` to cap how many frames are sent.
+> 🎬 **Video → video prompt (for LTXV / LTX-2):** Wire a video into the `video` input — either the **VIDEO** output of ComfyUI's core `Load Video`, or an **IMAGE** frame batch from a VHS-style loader — set `prompt_mode` to `Video description (LTXV)`, and the node analyzes the clip and writes a **text-to-video prompt for LTX-2 / LTXV**. Gemma4's tokenizer has a native `video=` path that processes the frames as a temporal sequence (Qwen3-VL has no `video=` kwarg, so it falls back to treating each frame as a separate still). Use `max_frames` to cap how many frames are sent.
 
 > 📌 **Works without an image too** — in that case the prompt is built from the instruction text alone (no image analysis). If both the image and the instruction are empty, it outputs empty strings.
 >
@@ -731,7 +731,7 @@ Inputs:
 | --- | --- | --- |
 | `clip` | CLIP | A vision-capable Gemma4 encoder loaded by a `CLIPLoader` (required) |
 | `image` | IMAGE | Image to analyze (optional). When connected, the prompt recreates a similar image; when not, it is built from the instruction text alone |
-| `video` | IMAGE | Video frames to analyze (optional). In ComfyUI a video is an IMAGE batch of frames (e.g. the IMAGE output of a Load Video node). Connect it and set `prompt_mode` to `Video description (LTXV)` to produce a **text-to-video prompt for LTX-2 / LTXV** describing the clip |
+| `video` | VIDEO / IMAGE | Video to analyze (optional). Accepts **both** the VIDEO output of ComfyUI's core `Load Video` (expanded to frames inside the node) and an IMAGE frame batch from a VHS-style loader. Connect it and set `prompt_mode` to `Video description (LTXV)` to produce a **text-to-video prompt for LTX-2 / LTXV** describing the clip |
 | `instruction` | STRING | Free-form modification instructions (e.g. `make it night, add rain`), applied on top of the image analysis |
 
 Settings:

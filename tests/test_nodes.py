@@ -356,6 +356,43 @@ class TestGemmaImagePrompt(unittest.TestCase):
         self.assertTrue(clip.got_video)
         self.assertFalse(clip.got_image)
 
+    def test_video_object_frames_are_extracted(self):
+        # ComfyUI core's "Load Video" outputs a VIDEO object (VideoInput), not an
+        # IMAGE batch. Its frames are pulled out via get_components().images.
+        class _Components:
+            def __init__(self, images):
+                self.images = images
+
+        class _FakeVideoObject:
+            def __init__(self, images):
+                self._images = images
+
+            def get_components(self):
+                return _Components(self._images)
+
+        batch = _FrameBatch(range(30))
+        frames = GemmaImagePrompt._extract_video_frames(_FakeVideoObject(batch))
+        self.assertIs(frames, batch)
+
+        clip = _FakeVisionClip()
+        GemmaImagePrompt.execute(
+            clip, video=_FakeVideoObject(batch), max_frames=4,
+            prompt_mode="Video description (LTXV)")
+        self.assertTrue(clip.got_video)
+        self.assertFalse(clip.got_image)
+
+    def test_video_input_accepts_image_and_video_types(self):
+        # The slot must accept BOTH a VIDEO output (core Load Video) and an
+        # IMAGE frame batch (VHS-style loaders).
+        video_type = GemmaImagePrompt.INPUT_TYPES()["optional"]["video"][0]
+        self.assertEqual(set(video_type.split(",")), {"IMAGE", "VIDEO"})
+
+    def test_extract_video_frames_passthrough(self):
+        # A plain IMAGE batch (no get_components) is used as-is; None stays None.
+        batch = _FrameBatch(range(3))
+        self.assertIs(GemmaImagePrompt._extract_video_frames(batch), batch)
+        self.assertIsNone(GemmaImagePrompt._extract_video_frames(None))
+
     def test_sample_frames_caps_count(self):
         # More frames than max_frames → uniformly sampled down to max_frames.
         sampled = GemmaImagePrompt._sample_frames(_FrameBatch(range(30)), 8)
