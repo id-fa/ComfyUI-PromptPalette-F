@@ -402,28 +402,129 @@ function getTemplateTextArea(node) {
   return null;
 }
 
-// Record the caret position whenever the user interacts with the textarea, so
-// that clicking the (blur-causing) picker button doesn't lose the insertion
-// point. Attached once per textarea.
-function ensureCaretTracker(node) {
-  const ta = getTemplateTextArea(node);
-  if (!ta) return null;
-  // Vue can replace the textarea element on a remount; a caret recorded against
-  // the old element is meaningless, so drop it and track the new one.
-  if (node._nvtCaretEl !== ta) {
-    node._nvtCaretEl = ta;
-    node._nvtCaret = null;
+// The textarea to read/write when we have no record of a previous edit. Under
+// the Vue renderer the box the user sees is the one mounted in the node's DOM
+// root, which is NOT necessarily `widget.inputEl`; the widget lookup is the
+// Classic-mode answer and the fallback.
+function findTemplateTextArea(node) {
+  if (node.id != null && document.querySelector) {
+    const root = document.querySelector(`.lg-node[data-node-id="${node.id}"]`);
+    const areas = root?.querySelectorAll?.("textarea");
+    // Only unambiguous when the node shows exactly one textarea (it does — the
+    // template widget is its only multiline input).
+    if (areas && areas.length === 1) return areas[0];
   }
-  if (ta._nvtTracked) return ta;
-  ta._nvtTracked = true;
-  const rec = () => {
-    if (ta._nvtSuppress) return;
-    node._nvtCaret = { start: ta.selectionStart, end: ta.selectionEnd };
+  return getTemplateTextArea(node);
+}
+
+// Which NodeValueTemplate node does this <textarea> belong to?
+//   - Classic: the widget owns the element, so `getTemplateTextArea` matches.
+//   - Nodes 2.0: the Vue renderer mounts its OWN textarea inside the node's DOM
+//     root, and it is NOT necessarily the element `widget.inputEl` points at —
+//     that is why a caret recorded against the widget's textarea never matched
+//     the one the user actually types in. Resolve through the DOM instead.
+// The answer is cached on the element (elements are per-node and long-lived).
+function nvtNodeForTextArea(ta) {
+  if (!ta || ta.tagName !== "TEXTAREA") return null;
+  const cached = ta._nvtNode;
+  if (cached && cached.graph && getTemplateWidget(cached)) return cached;
+
+  let found = null;
+  const root = ta.closest?.(".lg-node[data-node-id]");
+  const id = root?.dataset?.nodeId;
+  if (id != null && app.graph?.getNodeById) {
+    const n = app.graph.getNodeById(Number(id)) ?? app.graph.getNodeById(id);
+    // Sitting in some other node's body: definitely not ours, and skipping the
+    // scan below keeps this cheap when it runs on every keystroke anywhere.
+    if (!n || n.type !== "NodeValueTemplate") return null;
+    found = n;
+  }
+  if (!found) {
+    for (const n of app.graph?._nodes || []) {
+      if (n.type !== "NodeValueTemplate") continue;
+      if (getTemplateTextArea(n) === ta) {
+        found = n;
+        break;
+      }
+    }
+  }
+  // A node can host more than one textarea in theory; ours is the template one.
+  if (found && root && getTemplateTextArea(found) !== ta) {
+    const areas = root.querySelectorAll?.("textarea");
+    if (areas && areas.length > 1) found = null;
+  }
+  if (found) ta._nvtNode = found;
+  return found;
+}
+
+// The caret is stored together with the element AND the text it was measured
+// against: offsets are only meaningful for that exact string in that exact box.
+// Anything that changes the text without firing an event (a programmatic
+// `textarea.value = …` from the Vue renderer, ComfyUI's workflow undo, a value
+// restored on configure) would otherwise leave a stale offset pointing into the
+// middle of the new text.
+function recordCaret(node, ta) {
+  node._nvtCaret = {
+    el: ta,
+    start: ta.selectionStart,
+    end: ta.selectionEnd,
+    value: ta.value,
   };
-  ["keyup", "click", "select", "input", "focus", "blur"].forEach((ev) =>
-    ta.addEventListener(ev, rec)
+}
+
+// One document-level listener set for every NodeValueTemplate node — a single
+// global hook (constant memory, same pattern as index.js's wheel/mousemove
+// hooks) rather than per-node listeners that would have to be torn down.
+// `selectionchange` fires on the document with the textarea as activeElement,
+// and covers every caret move the other events miss (drag-select, held
+// Home/End, context-menu paste).
+function installGlobalCaretTracker() {
+  if (window.__nvtCaretHooked) return;
+  window.__nvtCaretHooked = true;
+  const rec = () => {
+    const ta = document.activeElement;
+    if (!ta || ta.tagName !== "TEXTAREA" || ta._nvtSuppress) return;
+    const node = nvtNodeForTextArea(ta);
+    if (node) recordCaret(node, ta);
+  };
+  ["selectionchange", "keyup", "mouseup", "input", "focusin"].forEach((ev) =>
+    document.addEventListener(ev, rec, true)
   );
-  return ta;
+}
+
+// Capture the caret of whichever textarea is focused right now, if it is this
+// node's template box. Called from the picker button's `pointerdown`, i.e.
+// before the button steals focus.
+function captureCaretNow(node) {
+  const ta = document.activeElement;
+  if (ta && ta.tagName === "TEXTAREA" && nvtNodeForTextArea(ta) === node) {
+    recordCaret(node, ta);
+    return ta;
+  }
+  return null;
+}
+
+// Decide WHERE the token goes and INTO WHICH element. The last edited textarea
+// wins over the widget's own (they differ under the Vue renderer); a focused
+// box always reports its live caret; otherwise the recorded caret is used only
+// if it still describes the current text.
+function resolveCaret(node) {
+  const rec = node._nvtCaret;
+  const ta =
+    rec && rec.el && rec.el.isConnected ? rec.el : findTemplateTextArea(node);
+  if (!ta) return { ta: null };
+  if (document.activeElement === ta) {
+    return { ta, start: ta.selectionStart, end: ta.selectionEnd };
+  }
+  if (!rec || rec.el !== ta || typeof rec.value !== "string") return { ta };
+  if (rec.value === ta.value) return { ta, start: rec.start, end: rec.end };
+  // Text changed behind our back. Keep the caret only when everything before it
+  // is untouched (so the offset still points at the same spot); a selection is
+  // dropped down to a plain caret because its end is no longer trustworthy.
+  if (ta.value.slice(0, rec.start) !== rec.value.slice(0, rec.start)) {
+    return { ta };
+  }
+  return { ta, start: rec.start, end: rec.start };
 }
 
 // Map of title -> first node with that title (matching the resolver, which
@@ -469,27 +570,24 @@ function closeTokenPicker() {
 }
 
 // Insert `token` into the template widget at the recorded caret position.
-function insertToken(node, token) {
+// `refocus` puts the caret back in the textarea afterwards; the picker passes
+// false while it stays open so the live caret can't be moved behind our back
+// between two inserts (the recorded one keeps advancing instead).
+function insertToken(node, token, refocus = true) {
   const widget = getTemplateWidget(node);
   if (!widget) return;
-  const ta = ensureCaretTracker(node);
+  const caret = resolveCaret(node);
+  const ta = caret.ta;
 
   let value = typeof widget.value === "string" ? widget.value : "";
   let start, end;
 
   if (ta) {
     value = ta.value;
-    // A focused textarea has the authoritative caret; the recorded one is only
-    // needed once the picker button has blurred it.
-    const caret =
-      document.activeElement === ta
-        ? { start: ta.selectionStart, end: ta.selectionEnd }
-        : node._nvtCaret;
-    if (caret) {
-      start = caret.start;
-      end = caret.end;
-    }
+    start = caret.start;
+    end = caret.end;
   }
+  // No usable caret (never focused, or the text moved under it) → append.
   if (start == null || start < 0 || start > value.length) {
     start = value.length;
     end = value.length;
@@ -497,21 +595,46 @@ function insertToken(node, token) {
   if (end == null || end < start || end > value.length) end = start;
 
   const next = value.slice(0, start) + token + value.slice(end);
-  widget.value = next;
-
   const pos = start + token.length;
+
+  // Opt-in diagnostics: set `window.__nvtDebug = true` in the console to see
+  // which box and offset an insert used.
+  if (window.__nvtDebug) {
+    console.log("[NodeValueTemplate] insert", {
+      start,
+      end,
+      length: value.length,
+      hasRecord: !!node._nvtCaret,
+      isWidgetTextArea: ta === getTemplateTextArea(node),
+      focused: !!ta && document.activeElement === ta,
+    });
+  }
 
   if (ta) {
     // Assigning `value` and focusing both fire tracked events that would
     // otherwise record a stale caret over the one we are about to set.
     ta._nvtSuppress = true;
     try {
-      ta.value = next;
-      // Notify ComfyUI's own listener so widget.value stays authoritative.
-      ta.dispatchEvent(new Event("input", { bubbles: true }));
+      // Prefer the native insertion: it keeps the browser's undo history and
+      // lets the textarea move its own caret. Falls back to a plain splice when
+      // the command is unavailable or refused.
+      let inserted = false;
       try {
         ta.focus();
+        ta.setSelectionRange(start, end);
+        inserted =
+          document.execCommand("insertText", false, token) && ta.value === next;
+      } catch (e) {
+        inserted = false;
+      }
+      if (!inserted) {
+        ta.value = next;
+        // Notify ComfyUI's own listener so widget.value stays authoritative.
+        ta.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      try {
         ta.setSelectionRange(pos, pos);
+        if (!refocus) ta.blur();
       } catch (e) {
         /* ignore */
       }
@@ -519,7 +642,10 @@ function insertToken(node, token) {
       ta._nvtSuppress = false;
     }
   }
-  node._nvtCaret = { start: pos, end: pos };
+  widget.value = next;
+  node._nvtCaret = ta
+    ? { el: ta, start: pos, end: pos, value: next }
+    : null;
   if (typeof widget.callback === "function") {
     try {
       widget.callback(widget.value);
@@ -533,7 +659,6 @@ function insertToken(node, token) {
 function openTokenPicker(node) {
   injectModalCSS();
   closeTokenPicker();
-  ensureCaretTracker(node);
 
   const titleMap = collectTitleMap(node);
   const titles = Array.from(titleMap.keys()).sort((a, b) => a.localeCompare(b));
@@ -620,7 +745,7 @@ function openTokenPicker(node) {
   function doInsert(close) {
     const token = buildToken();
     if (!token) return;
-    insertToken(node, token);
+    insertToken(node, token, close);
     if (close) closeTokenPicker();
   }
 
@@ -852,18 +977,14 @@ function addPickerButton(node) {
   const btn = document.createElement("button");
   btn.className = "nvt-pick-btn";
   btn.textContent = "🔍 ノードの値を挿入…";
-  // Runs before the button steals focus, so the still-focused textarea's caret
-  // is recorded even if the tracker had not been attached yet.
+  // Runs before the button steals focus, so the caret of the box the user was
+  // typing in is captured even if no other event had recorded it yet.
   btn.addEventListener("pointerdown", () => {
-    const ta = ensureCaretTracker(node);
-    if (ta && document.activeElement === ta) {
-      node._nvtCaret = { start: ta.selectionStart, end: ta.selectionEnd };
-    }
+    captureCaretNow(node);
   });
   btn.addEventListener("click", (e) => {
     e.preventDefault();
     e.stopPropagation();
-    ensureCaretTracker(node);
     openTokenPicker(node);
   });
   wrap.appendChild(btn);
@@ -894,15 +1015,14 @@ app.registerExtension({
       const result = onNodeCreated?.apply(this, arguments);
       injectModalCSS();
       addPickerButton(this);
-      // The textarea is created shortly after; attach the caret tracker once
-      // it exists (a single delayed attempt is enough — it no-ops if missing).
-      setTimeout(() => ensureCaretTracker(this), 0);
+      installGlobalCaretTracker();
       return result;
     };
   },
 
   async setup() {
     injectModalCSS();
+    installGlobalCaretTracker();
     // Resolve %Title.widget% tokens by post-processing the prompt that ComfyUI
     // builds, then leave the network send untouched.
     //
