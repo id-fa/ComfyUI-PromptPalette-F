@@ -1177,7 +1177,7 @@ class GemmaImagePrompt(BaseNodeClass):
                     "default": 8,
                     "min": 1,
                     "max": 64,
-                    "tooltip": "Maximum number of frames uniformly sampled from the video before sending to the model (caps VRAM/context; especially important for Qwen3-VL, which treats every frame as a separate still).",
+                    "tooltip": "Maximum number of frames sampled from the video before sending to the model (caps VRAM/context; especially important for Qwen3-VL, which treats every frame as a separate still). The first and last frame are always kept and the rest of the budget goes to the moments where the picture changes most, so cuts and gestures are not missed.",
                 }),
             },
         }
@@ -1190,7 +1190,7 @@ class GemmaImagePrompt(BaseNodeClass):
     @classmethod
     def _build_request(cls, instruction, image_present, output_format,
                        target_model, detail_mode, prompt_mode,
-                       video_present=False):
+                       video_present=False, frame_note=""):
         """Assemble the instruction prompt sent to Gemma, adjusted by settings.
 
         Three modes:
@@ -1207,7 +1207,8 @@ class GemmaImagePrompt(BaseNodeClass):
 
         if is_video:
             return cls._build_video_request(
-                instruction, image_present, video_present, detail_mode)
+                instruction, image_present, video_present, detail_mode,
+                frame_note=frame_note)
 
         lines = [
             "You are an expert prompt engineer for text-to-image diffusion models."
@@ -1281,6 +1282,9 @@ class GemmaImagePrompt(BaseNodeClass):
                     "negative prompt empty."
                 )
 
+        if video_present and frame_note:
+            lines.append(frame_note)
+
         if detail_mode == "Expand detail":
             if is_edit:
                 lines.append(
@@ -1317,7 +1321,7 @@ class GemmaImagePrompt(BaseNodeClass):
 
     @classmethod
     def _build_video_request(cls, instruction, image_present, video_present,
-                             detail_mode):
+                             detail_mode, frame_note=""):
         """Assemble an LTX-2 / LTXV-style text-to-video request prompt.
 
         LTX-2 prompts work best as a single flowing paragraph in the present
@@ -1336,6 +1340,8 @@ class GemmaImagePrompt(BaseNodeClass):
                 "describes what happens in it so a text-to-video model can "
                 "recreate a visually and temporally similar clip."
             )
+            if frame_note:
+                lines.append(frame_note)
         elif image_present:
             lines.append(
                 "Look at the provided image and write a text-to-video prompt "
@@ -1467,47 +1473,222 @@ class GemmaImagePrompt(BaseNodeClass):
             return False
 
     @staticmethod
-    def _extract_video_frames(video):
-        """Normalize the `video` input to an IMAGE frame batch.
+    def _extract_video(video):
+        """Normalize the `video` input to an (IMAGE frame batch, fps) pair.
 
         The slot accepts a union type ("IMAGE,VIDEO"), so it can receive either:
           * an IMAGE batch tensor [frames, H, W, C] (VHS-style loaders) — used
-            as-is, or
+            as-is, with an unknown frame rate (a bare batch has no timeline), or
           * a VIDEO object (ComfyUI core "Load Video" → comfy_api VideoInput) —
-            its frames are pulled out via get_components().images.
-        Note that get_components() materializes the WHOLE video in memory;
-        _sample_frames() then caps it to max_frames before it reaches the model.
-        Returns None if a VIDEO object yields no frames."""
+            its frames and frame rate come from get_components().
+        Note that get_components() materializes the WHOLE video in memory; the
+        frame selection then caps it to max_frames before it reaches the model.
+        Returns (None, None) if a VIDEO object yields no frames."""
         if video is None:
-            return None
+            return None, None
         getter = getattr(video, "get_components", None)
         if callable(getter):
             components = getter()
-            return getattr(components, "images", None)
-        return video
+            rate = getattr(components, "frame_rate", None)
+            try:
+                fps = float(rate) if rate else None
+            except (TypeError, ValueError):
+                fps = None
+            return getattr(components, "images", None), fps
+        return video, None
+
+    @classmethod
+    def _extract_video_frames(cls, video):
+        """The frames of _extract_video(), for callers that don't need the fps."""
+        return cls._extract_video(video)[0]
+
+    # --- Frame selection -----------------------------------------------------
+    # Frames are NOT thinned evenly: candidates are taken at roughly one per
+    # second, then the budget is spent on the first frame, the last frame and
+    # the candidates that changed most from the one before them. That is where
+    # the cut, the gesture or the camera move is — exactly what an evenly
+    # spaced sample keeps missing on a clip that holds still and then does one
+    # thing. Mirrors the sampling in ComfyUI-LLM-Widget.
+    _CANDIDATE_FPS = 1.0        # candidate density along the clip
+    _CANDIDATE_FACTOR = 4       # candidates per budgeted frame, at least
+    _MAX_CANDIDATES = 180       # cap on scored candidates (long clips)
+    _SCORE_SIDE = 48            # change is judged on a coarse strided view
+    _DEFAULT_FPS = 24.0         # assumed rate when the input carries none
+
+    @classmethod
+    def _candidate_indices(cls, total, fps, minimum):
+        """Frame indices worth considering: about one per second, the last frame
+        always included, capped at _MAX_CANDIDATES. A clip too short to offer
+        `minimum` candidates at that rate is sampled faster instead — a five
+        second clip has only five candidates at 1 fps, which would leave the
+        change scoring nothing to choose between."""
+        if total <= 0:
+            return []
+        try:
+            rate = float(fps) or cls._DEFAULT_FPS
+        except (TypeError, ValueError):
+            rate = cls._DEFAULT_FPS
+        step = max(1, int(round(rate / cls._CANDIDATE_FPS)))
+        if minimum > 1:
+            step = max(1, min(step, total // max(1, minimum - 1)))
+        idx = list(range(0, total, step))
+        if idx[-1] != total - 1:
+            idx.append(total - 1)
+        if len(idx) > cls._MAX_CANDIDATES:
+            stride = len(idx) / float(cls._MAX_CANDIDATES)
+            thinned = [
+                idx[min(len(idx) - 1, int(i * stride))]
+                for i in range(cls._MAX_CANDIDATES)
+            ]
+            thinned[-1] = idx[-1]
+            idx = sorted(set(thinned))
+        return idx
+
+    @classmethod
+    def _change_scores(cls, frames, indices):
+        """Mean absolute difference of each candidate from the previous one.
+
+        Scored on a strided (cheap) view of the frames: what matters is that the
+        composition moved, not that the encoder's noise did. Returns None when
+        the batch doesn't support the tensor ops (e.g. a plain test sentinel),
+        so the caller can fall back to even spacing."""
+        try:
+            step_h = max(1, int(frames.shape[1]) // cls._SCORE_SIDE)
+            step_w = max(1, int(frames.shape[2]) // cls._SCORE_SIDE)
+            # Stride FIRST: plain slicing is a view, so only the coarse
+            # thumbnails of the candidates are copied — picking the candidates
+            # first would copy up to _MAX_CANDIDATES full-resolution frames.
+            small = frames[:, ::step_h, ::step_w, :3][list(indices)].float()
+            diff = (small[1:] - small[:-1]).abs().mean(dim=(1, 2, 3))
+            return [0.0] + [float(v) for v in diff]
+        except Exception:
+            return None
 
     @staticmethod
-    def _sample_frames(video, max_frames):
-        """Uniformly sample at most max_frames frames from an IMAGE batch tensor
-        (shape [frames, H, W, C]). Caps VRAM/context before the frames reach the
-        model. Defensive: returns the input unchanged if it isn't an indexable
-        batch (so plain sentinels used in tests pass straight through)."""
+    def _select_by_change(scores, count):
+        """Choose `count` candidate positions: both ends, then wherever the
+        picture moved most. The first and last candidate are never given up — a
+        clip is judged by where it starts and where it ends.
+
+        Equal scores are broken by distance from what is already chosen. Real
+        footage never ties (sensor noise alone moves the number), but a
+        synthetic or perfectly still clip otherwise spends its whole budget on
+        the first few frames, which reads as a long dwell that never happened."""
+        total = len(scores)
+        if total <= count:
+            return list(range(total))
+        if count <= 1:
+            return [0] if total else []
+        chosen = [0, total - 1]
+        while len(chosen) < count:
+            rest = [p for p in range(1, total - 1) if p not in chosen]
+            if not rest:
+                break
+            chosen.append(max(
+                rest,
+                key=lambda p: (
+                    scores[p], min(abs(p - c) for c in chosen), -p,
+                ),
+            ))
+        return sorted(chosen)
+
+    @classmethod
+    def _select_frame_indices(cls, frames, max_frames, fps=None):
+        """Which frames of an IMAGE batch to send to the model (at most
+        max_frames). Returns None when `frames` isn't an indexable batch."""
         try:
-            n = int(video.shape[0])
+            n = int(frames.shape[0])
         except Exception:
-            return video
+            return None
         try:
             m = max(1, int(max_frames))
         except Exception:
             m = 8
         if n <= m:
-            return video
-        step = n / float(m)
-        idx = [min(n - 1, int(i * step)) for i in range(m)]
+            return list(range(n))
+
+        # Deliberately more candidates than the budget: with one candidate per
+        # budgeted frame there is no choice left to make and the selection
+        # degrades to even spacing.
+        candidates = cls._candidate_indices(n, fps, m * cls._CANDIDATE_FACTOR)
+        if not candidates:
+            candidates = list(range(n))
+        if len(candidates) <= m:
+            return candidates
+
+        scores = cls._change_scores(frames, candidates)
+        if scores is not None and len(scores) == len(candidates):
+            return [candidates[p] for p in cls._select_by_change(scores, m)]
+
+        # Scoring unavailable (no tensor ops): thin the candidates evenly.
+        stride = len(candidates) / float(m)
+        picked = [
+            candidates[min(len(candidates) - 1, int(i * stride))]
+            for i in range(m)
+        ]
+        picked[-1] = candidates[-1]
+        return sorted(set(picked))
+
+    @staticmethod
+    def _take_frames(frames, indices):
+        """frames[indices] — the whole batch when nothing was dropped (avoids a
+        pointless copy) or when it can't be indexed."""
         try:
-            return video[idx]
+            if len(indices) >= int(frames.shape[0]):
+                return frames
         except Exception:
+            pass
+        try:
+            return frames[list(indices)]
+        except Exception:
+            return frames
+
+    @staticmethod
+    def _frame_times(indices, fps):
+        """The second each selected frame sits at, or [] when the frame rate is
+        unknown (a bare IMAGE batch carries no timeline)."""
+        try:
+            rate = float(fps)
+        except (TypeError, ValueError):
+            return []
+        if rate <= 0:
+            return []
+        return [i / rate for i in indices]
+
+    @classmethod
+    def _sample_frames(cls, video, max_frames, fps=None):
+        """At most max_frames frames of an IMAGE batch tensor (shape
+        [frames, H, W, C]), chosen by _select_frame_indices. Caps VRAM/context
+        before the frames reach the model. Defensive: returns the input
+        unchanged if it isn't an indexable batch."""
+        indices = cls._select_frame_indices(video, max_frames, fps)
+        if indices is None:
             return video
+        return cls._take_frames(video, indices)
+
+    @staticmethod
+    def _frame_note(count, times):
+        """One line telling the model how the attached frames were sampled.
+
+        The selection is deliberately uneven, so the model has to be told:
+        otherwise a held shot followed by a cut reads as steady motion, and the
+        described speed is wrong. Timestamps are stated when the frame rate is
+        known (a VIDEO input); a bare IMAGE batch has no timeline."""
+        if count <= 0:
+            return ""
+        if times:
+            stamps = " / ".join("{:.1f}s".format(float(t)) for t in times)
+            return (
+                "The video is provided as {n} frames sampled from the clip at "
+                "{s}. The spacing is uneven — more frames are taken where the "
+                "picture changes — so read the timestamps rather than assuming "
+                "a constant interval.".format(n=count, s=stamps)
+            )
+        return (
+            "The video is provided as {n} frames sampled from the clip, "
+            "unevenly — more frames are taken where the picture changes — so "
+            "do not assume a constant interval between them.".format(n=count)
+        )
 
     @classmethod
     def _tokenize_visual(cls, clip, prompt, key, media):
@@ -1584,17 +1765,28 @@ class GemmaImagePrompt(BaseNodeClass):
         if not image_present and not video_present and not instr.strip():
             return cls._output("", "")
 
-        request = cls._build_request(
-            instr, image_present, output_format, target_model, detail_mode,
-            prompt_mode, video_present=video_present,
-        )
-
         try:
-            frames = cls._extract_video_frames(video) if video_present else None
-            sampled_video = (
-                cls._sample_frames(frames, max_frames)
-                if frames is not None else None
+            # Frame selection first: the chosen frames are not evenly spaced, so
+            # the request has to state how many there are and where they sit.
+            frames, fps = (
+                cls._extract_video(video) if video_present else (None, None)
             )
+            sampled_video, frame_times, frame_count = None, [], 0
+            if frames is not None:
+                indices = cls._select_frame_indices(frames, max_frames, fps)
+                if indices is None:
+                    sampled_video = frames
+                else:
+                    sampled_video = cls._take_frames(frames, indices)
+                    frame_times = cls._frame_times(indices, fps)
+                    frame_count = len(indices)
+
+            request = cls._build_request(
+                instr, image_present, output_format, target_model, detail_mode,
+                prompt_mode, video_present=video_present,
+                frame_note=cls._frame_note(frame_count, frame_times),
+            )
+
             raw = cls._generate(
                 clip, request,
                 image if image_present else None,

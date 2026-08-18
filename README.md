@@ -287,7 +287,7 @@ Nodes 2.0モードでは編集モード時の設定行に省略表示されま�
 
 入力画像をGemma4に「見せて」、それに似た画像を生成するための text-to-image プロンプトを出力するノードです。修正指示を受け付けて反映し、想定する生成モデルや出力形式に合わせてプロンプトを調整します。画像認識→生成は、`Gemma Translate` と同様に**ワークフロー実行（Queue Prompt）時**に走ります。
 
-> 🎬 **動画→動画プロンプト（LTXV / LTX-2 用）**: `video` 入力に動画を接続し（ComfyUI標準の `Load Video` の **VIDEO** 出力、またはVHS系ローダーの **IMAGE**（フレームバッチ）出力のどちらでも可）、`prompt_mode` を `Video description (LTXV)` にすると、動画内容を解析して **LTX-2 / LTXV 向けの text-to-video プロンプト**を生成します。Gemma4のトークナイザにはネイティブの `video=` 経路があり、フレームを時系列として処理します（Qwen3-VLの場合は `video=` が無いため各フレームを個別の静止画として扱うフォールバックになります）。`max_frames` で送るフレーム数を制限できます。
+> 🎬 **動画→動画プロンプト（LTXV / LTX-2 用）**: `video` 入力に動画を接続し（ComfyUI標準の `Load Video` の **VIDEO** 出力、またはVHS系ローダーの **IMAGE**（フレームバッチ）出力のどちらでも可）、`prompt_mode` を `Video description (LTXV)` にすると、動画内容を解析して **LTX-2 / LTXV 向けの text-to-video プロンプト**を生成します。Gemma4のトークナイザにはネイティブの `video=` 経路があり、フレームを時系列として処理します（Qwen3-VLの場合は `video=` が無いため各フレームを個別の静止画として扱うフォールバックになります）。`max_frames` で送るフレーム数を制限できます。抜き出すフレームは**均等割りではなく変化量ベース**（最初と最後＋変化の大きい瞬間）で選ばれ、選んだフレームの位置（秒数、VIDEO入力時のみ）はプロンプト内でモデルに伝えられます。
 
 > 📌 **画像入力なしでも動作**します。その場合は「指示テキストのみ」から画像生成プロンプトを組み立てます（画像認識は行いません）。画像も指示も両方空の場合は空文字を出力します。
 >
@@ -314,7 +314,7 @@ Nodes 2.0モードでは編集モード時の設定行に省略表示されま�
 | `prompt_mode` | `Generate (recreate image)` / `Edit instruction (change description)` / `Video description (LTXV)` | 出力の種類。①似た画像を生成するプロンプト。②**画像編集モデル（Qwen Image Edit等）向け**に「赤い車を青い車に変える」のように**変更前→変更後を明示した編集指示**を出力（変更後の描写だけにしない）。③**LTX-2 / LTXV 向けの text-to-video プロンプト**：1段落・現在形・カメラワーク用語（pans/tracks/pushes in 等）・時系列で literal なモーション記述。ネガティブは空。`video` 入力と併用します |
 | `max_length` | INT | 生成する最大トークン数（デフォルト：512） |
 | `unload_after` | BOOLEAN | ONで実行後にモデルをVRAMからアンロード（デフォルトOFF） |
-| `max_frames` | INT | 動画から均等サンプリングして送る最大フレーム数（デフォルト：8）。VRAM/コンテキストの上限対策。特にQwen3-VLは各フレームを個別の静止画として扱うため重要です |
+| `max_frames` | INT | 動画から抜き出して送る最大フレーム数（デフォルト：8）。VRAM/コンテキストの上限対策で、特にQwen3-VLは各フレームを個別の静止画として扱うため重要です。**均等割りではなく変化量ベース**で選びます：最初と最後のフレームは必ず残し、残りの枠を「直前のフレームからの変化が大きい」箇所（カット・動き出し・カメラワーク）に割り当てるので、止まっている時間が長い動画でも動きのある瞬間を取りこぼしません |
 
 出力:
 
@@ -719,7 +719,7 @@ Outputs:
 
 Shows an input image to Gemma4 and writes a text-to-image prompt that would generate a visually similar image. It applies your free-form modification instructions and adjusts the prompt for the intended generation model and output style. As with `Gemma Translate`, the analysis/generation runs **when you Queue Prompt**.
 
-> 🎬 **Video → video prompt (for LTXV / LTX-2):** Wire a video into the `video` input — either the **VIDEO** output of ComfyUI's core `Load Video`, or an **IMAGE** frame batch from a VHS-style loader — set `prompt_mode` to `Video description (LTXV)`, and the node analyzes the clip and writes a **text-to-video prompt for LTX-2 / LTXV**. Gemma4's tokenizer has a native `video=` path that processes the frames as a temporal sequence (Qwen3-VL has no `video=` kwarg, so it falls back to treating each frame as a separate still). Use `max_frames` to cap how many frames are sent.
+> 🎬 **Video → video prompt (for LTXV / LTX-2):** Wire a video into the `video` input — either the **VIDEO** output of ComfyUI's core `Load Video`, or an **IMAGE** frame batch from a VHS-style loader — set `prompt_mode` to `Video description (LTXV)`, and the node analyzes the clip and writes a **text-to-video prompt for LTX-2 / LTXV**. Gemma4's tokenizer has a native `video=` path that processes the frames as a temporal sequence (Qwen3-VL has no `video=` kwarg, so it falls back to treating each frame as a separate still). Use `max_frames` to cap how many frames are sent. The frames are chosen **by change, not by even spacing** (first + last + the biggest changes), and where they sit in the clip (in seconds, when the input is a VIDEO) is stated to the model in the request.
 
 > 📌 **Works without an image too** — in that case the prompt is built from the instruction text alone (no image analysis). If both the image and the instruction are empty, it outputs empty strings.
 >
@@ -744,7 +744,7 @@ Settings:
 | `prompt_mode` | `Generate (recreate image)` / `Edit instruction (change description)` / `Video description (LTXV)` | What to output. Generate → a prompt that recreates a similar image. Edit instruction → for **image-editing models (e.g. Qwen Image Edit)**, a "change X into Y" instruction that states **both the original element and what it becomes** (not just the final result). Video description (LTXV) → a **text-to-video prompt for LTX-2 / LTXV**: one flowing paragraph, present tense, explicit camera moves (pans/tracks/pushes in), chronological literal motion; negative left empty. Pair it with the `video` input |
 | `max_length` | INT | Maximum number of tokens to generate (default: 512) |
 | `unload_after` | BOOLEAN | Unload models from VRAM after running (default OFF) |
-| `max_frames` | INT | Max number of frames uniformly sampled from the video before sending to the model (default: 8). Caps VRAM/context — especially important for Qwen3-VL, which treats every frame as a separate still |
+| `max_frames` | INT | Max number of frames taken from the video before sending to the model (default: 8). Caps VRAM/context — especially important for Qwen3-VL, which treats every frame as a separate still. Frames are picked **by how much changed, not evenly**: the first and last frame are always kept and the remaining budget goes to the biggest changes (cuts, the start of a motion, camera moves), so a clip that holds still and then does one thing does not lose that one thing |
 
 Outputs:
 

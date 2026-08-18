@@ -14,6 +14,7 @@ Run from the repo root:
 import os
 import sys
 import unittest
+from fractions import Fraction
 
 # Make the repo root importable so `import nodes` works from anywhere.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -185,6 +186,64 @@ class _FrameBatch:
 
     def __getitem__(self, idx):
         return _FrameBatch([self.frames[i] for i in idx])
+
+
+class _PixelBatch:
+    """Frame batch double where each frame is ONE scalar brightness value.
+
+    Supports the tensor operations _change_scores performs (list/slice/tuple
+    indexing, .float(), .abs(), .mean(dim=...)), so the change-based frame
+    selection can be exercised without torch."""
+
+    def __init__(self, values):
+        self.values = list(values)
+
+    @property
+    def shape(self):
+        return (len(self.values), 8, 8, 3)
+
+    def __len__(self):
+        return len(self.values)
+
+    def __getitem__(self, idx):
+        if isinstance(idx, list):
+            return _PixelBatch([self.values[i] for i in idx])
+        if isinstance(idx, slice):
+            return _PixelBatch(self.values[idx])
+        if isinstance(idx, tuple):
+            # A strided view like [:, ::h, ::w, :3] — the scalar per frame is
+            # unchanged, only the frame axis selection matters here.
+            return _PixelBatch(self.values[idx[0]])
+        return self.values[idx]
+
+    def float(self):
+        return self
+
+    def abs(self):
+        return _PixelBatch([abs(v) for v in self.values])
+
+    def __sub__(self, other):
+        return _PixelBatch([a - b for a, b in zip(self.values, other.values)])
+
+    def mean(self, dim=None):
+        return list(self.values)
+
+
+class _Components:
+    def __init__(self, images, frame_rate=None):
+        self.images = images
+        self.frame_rate = frame_rate
+
+
+class _FakeVideoObject:
+    """Stand-in for a ComfyUI VIDEO (comfy_api VideoInput)."""
+
+    def __init__(self, images, frame_rate=None):
+        self._images = images
+        self._rate = frame_rate
+
+    def get_components(self):
+        return _Components(self._images, self._rate)
 
 
 class TestGemmaImagePrompt(unittest.TestCase):
@@ -359,17 +418,6 @@ class TestGemmaImagePrompt(unittest.TestCase):
     def test_video_object_frames_are_extracted(self):
         # ComfyUI core's "Load Video" outputs a VIDEO object (VideoInput), not an
         # IMAGE batch. Its frames are pulled out via get_components().images.
-        class _Components:
-            def __init__(self, images):
-                self.images = images
-
-        class _FakeVideoObject:
-            def __init__(self, images):
-                self._images = images
-
-            def get_components(self):
-                return _Components(self._images)
-
         batch = _FrameBatch(range(30))
         frames = GemmaImagePrompt._extract_video_frames(_FakeVideoObject(batch))
         self.assertIs(frames, batch)
@@ -393,8 +441,88 @@ class TestGemmaImagePrompt(unittest.TestCase):
         self.assertIs(GemmaImagePrompt._extract_video_frames(batch), batch)
         self.assertIsNone(GemmaImagePrompt._extract_video_frames(None))
 
+    def test_select_frames_favours_the_biggest_change(self):
+        # A clip that holds still and then cuts: the cut is at frame 37, which
+        # an evenly spaced sample (0/15/30/45) walks straight past.
+        batch = _PixelBatch([0.0] * 37 + [100.0] * 23)
+        idx = GemmaImagePrompt._select_frame_indices(batch, 4, fps=1.0)
+        self.assertEqual(len(idx), 4)
+        self.assertIn(37, idx)          # the cut itself
+        self.assertIn(0, idx)           # first frame never given up
+        self.assertIn(59, idx)          # last frame never given up
+
+    def test_select_frames_on_a_static_clip(self):
+        # Nothing moves: the budget still returns exactly max_frames frames,
+        # with both ends kept.
+        batch = _PixelBatch([5.0] * 40)
+        idx = GemmaImagePrompt._select_frame_indices(batch, 5, fps=1.0)
+        self.assertEqual(len(idx), 5)
+        self.assertEqual(idx[0], 0)
+        self.assertEqual(idx[-1], 39)
+        self.assertEqual(idx, sorted(set(idx)))
+
+    def test_select_by_change_keeps_both_ends(self):
+        # Pure selection logic: scores 0..n, both ends forced in first.
+        scores = [0.0, 1.0, 9.0, 2.0, 8.0, 0.0]
+        self.assertEqual(
+            GemmaImagePrompt._select_by_change(scores, 4), [0, 2, 4, 5])
+        # Budget at or above the candidate count → everything is kept.
+        self.assertEqual(
+            GemmaImagePrompt._select_by_change([0.0, 1.0], 5), [0, 1])
+
+    def test_candidate_indices_cover_the_whole_clip(self):
+        # ~1 candidate per second, last frame always included.
+        idx = GemmaImagePrompt._candidate_indices(120, 24.0, 4)
+        self.assertEqual(idx[0], 0)
+        self.assertEqual(idx[-1], 119)
+        # A short clip is sampled faster so the frame budget can still be met.
+        short = GemmaImagePrompt._candidate_indices(20, 24.0, 8)
+        self.assertGreaterEqual(len(short), 8)
+
+    def test_extract_video_reads_the_frame_rate(self):
+        batch = _PixelBatch([0.0] * 4)
+        frames, fps = GemmaImagePrompt._extract_video(
+            _FakeVideoObject(batch, frame_rate=Fraction(30, 1)))
+        self.assertIs(frames, batch)
+        self.assertEqual(fps, 30.0)
+        # A bare IMAGE batch carries no timeline.
+        self.assertEqual(GemmaImagePrompt._extract_video(batch), (batch, None))
+        self.assertEqual(GemmaImagePrompt._extract_video(None), (None, None))
+
+    def test_frame_times_need_a_frame_rate(self):
+        self.assertEqual(
+            GemmaImagePrompt._frame_times([0, 12, 24], 24.0), [0.0, 0.5, 1.0])
+        self.assertEqual(GemmaImagePrompt._frame_times([0, 5], None), [])
+        self.assertEqual(GemmaImagePrompt._frame_times([0, 5], 0), [])
+
+    def test_request_states_the_frame_timestamps(self):
+        # The selection is uneven, so the request has to say so — otherwise a
+        # held shot followed by a cut reads as steady motion.
+        clip = _FakeVisionClip()
+        GemmaImagePrompt.execute(
+            clip,
+            video=_FakeVideoObject(
+                _PixelBatch([0.0] * 60), frame_rate=Fraction(24, 1)),
+            max_frames=4, prompt_mode="Video description (LTXV)")
+        p = clip.last_prompt
+        self.assertIn("4 frames sampled from the clip at", p)
+        self.assertIn("0.0s", p)
+        self.assertIn("spacing is uneven", p)
+
+    def test_request_omits_timestamps_without_a_frame_rate(self):
+        # An IMAGE batch (VHS-style loader) has no frame rate to quote.
+        clip = _FakeVisionClip()
+        GemmaImagePrompt.execute(
+            clip, video=_PixelBatch([0.0] * 60), max_frames=4,
+            prompt_mode="Video description (LTXV)")
+        p = clip.last_prompt
+        self.assertIn("4 frames sampled from the clip", p)
+        self.assertNotIn("0.0s", p)
+        self.assertIn("do not assume a constant interval", p)
+
     def test_sample_frames_caps_count(self):
-        # More frames than max_frames → uniformly sampled down to max_frames.
+        # More frames than max_frames → sampled down to max_frames (this batch
+        # supports no tensor ops, so the even-spacing fallback runs).
         sampled = GemmaImagePrompt._sample_frames(_FrameBatch(range(30)), 8)
         self.assertEqual(sampled.shape[0], 8)
         # Fewer frames than max_frames → returned unchanged.
