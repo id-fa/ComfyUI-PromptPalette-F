@@ -308,16 +308,88 @@ class TestGemmaImagePrompt(unittest.TestCase):
         self.assertEqual(positive, "just a plain prompt with no labels")
         self.assertEqual(negative, "")
 
-    def test_generation_error_is_caught(self):
+    def test_generation_error_propagates(self):
+        # Errors must stop the job instead of being written into the output.
         class _BoomClip(_FakeVisionClip):
             def generate(self, tokens, **kwargs):
                 raise RuntimeError("vision exploded")
 
-        out = GemmaImagePrompt.execute(_BoomClip(), image=object())
-        positive, negative = out["result"]
-        self.assertIn("Gemma Image Prompt error", positive)
-        self.assertIn("vision exploded", positive)
-        self.assertEqual(negative, "")
+        with self.assertRaises(RuntimeError) as ctx:
+            GemmaImagePrompt.execute(_BoomClip(), image=object())
+        self.assertIn("vision exploded", str(ctx.exception))
+
+    def test_error_names_the_stage_and_a_likely_cause(self):
+        # A raw traceback says nothing about WHY, so the message must carry a
+        # stage and a best-guess cause alongside the original error.
+        class _BoomClip(_FakeVisionClip):
+            def generate(self, tokens, **kwargs):
+                raise ValueError("something nobody predicted")
+
+        with self.assertRaises(RuntimeError) as ctx:
+            GemmaImagePrompt.execute(_BoomClip(), image=object())
+        msg = str(ctx.exception)
+        self.assertIn("generation", msg)          # stage
+        self.assertIn("likely cause", msg)        # hint section
+        self.assertIn("gemma4", msg)              # generic checklist
+        self.assertIn("ValueError", msg)          # original error kept
+
+    def test_clip_without_generate_is_rejected_with_a_reason(self):
+        # The most common setup mistake: a plain SD/SDXL CLIP wired into `clip`.
+        class _PlainClip:
+            def tokenize(self, prompt, **kwargs):
+                return {}
+
+        with self.assertRaises(RuntimeError) as ctx:
+            GemmaImagePrompt.execute(_PlainClip(), instruction="a cat")
+        msg = str(ctx.exception)
+        self.assertIn("generate", msg)   # names what is missing
+        self.assertIn("CLIPLoader", msg)
+        self.assertIn("gemma4", msg)
+
+    def test_text_only_model_with_an_image_says_it_is_not_vision(self):
+        class _TextOnlyClip(_FakeVisionClip):
+            def tokenize_with_weights(self, text, return_word_ids=False):
+                raise NotImplementedError
+
+        with self.assertRaises(RuntimeError) as ctx:
+            GemmaImagePrompt.execute(_TextOnlyClip(), image=object())
+        self.assertIn("vision", str(ctx.exception))
+
+    def test_out_of_memory_hint(self):
+        class _OomClip(_FakeVisionClip):
+            def generate(self, tokens, **kwargs):
+                raise RuntimeError("CUDA out of memory. Tried to allocate 2 GiB")
+
+        with self.assertRaises(RuntimeError) as ctx:
+            GemmaImagePrompt.execute(_OomClip(), image=object())
+        self.assertIn("VRAM", str(ctx.exception))
+
+    def test_video_decode_failure_hint(self):
+        class _BadVideo:
+            def get_components(self):
+                raise RuntimeError("could not demux stream")
+
+        with self.assertRaises(RuntimeError) as ctx:
+            GemmaImagePrompt.execute(_FakeVisionClip(), video=_BadVideo())
+        msg = str(ctx.exception)
+        self.assertIn("video frame extraction", msg)   # stage
+        self.assertIn("Load Video", msg)
+
+    def test_unexpected_image_kwarg_hint(self):
+        # A tokenizer that takes **kwargs passes _check_clip, then blows up at
+        # generation time - the hint has to be recovered from the message.
+        class _SwallowingClip(_FakeVisionClip):
+            def tokenize(self, prompt, **kwargs):
+                raise TypeError(
+                    "tokenize_with_weights() got an unexpected keyword "
+                    "argument 'image'")
+
+            def tokenize_with_weights(self, text, **kwargs):
+                raise NotImplementedError
+
+        with self.assertRaises(RuntimeError) as ctx:
+            GemmaImagePrompt.execute(_SwallowingClip(), image=object())
+        self.assertIn("vision", str(ctx.exception))
 
     def test_default_mode_is_generation(self):
         clip = _FakeVisionClip()

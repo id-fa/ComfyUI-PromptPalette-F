@@ -1744,6 +1744,177 @@ class GemmaImagePrompt(BaseNodeClass):
         out = clip.decode(generated_ids)
         return out if isinstance(out, str) else str(out)
 
+    # --- Error reporting -----------------------------------------------------
+    # Failures stop the job (they are no longer written into the output text),
+    # but a bare TypeError from deep inside a tokenizer tells the user nothing
+    # about WHY. _fail() re-raises with the stage and the likely cause spelled
+    # out, so the common setup mistakes are self-diagnosing:
+    #   * a CLIP that cannot generate text at all (wrong CLIPLoader type)
+    #   * a text-only model fed an image/video (not a vision model)
+    #   * ComfyUI too old for the generation / Qwen VL APIs
+    #   * out of VRAM
+    _STAGE_LABELS = {
+        "video": "動画フレームの取り出し / video frame extraction",
+        "request": "プロンプトの組み立て / request building",
+        "generate": "推論の実行 / generation",
+        "parse": "出力の解析 / output parsing",
+    }
+
+    _HINT_NO_VISION = (
+        "接続された CLIP は画像・動画の入力に対応していません"
+        "（vision非対応のテキスト専用モデル）。`CLIPLoader` で vision 対応の"
+        " Gemma4 か Qwen3-VL（ComfyUI v0.26.0以降）を読み込むか、"
+        "`image` / `video` の接続を外して指示テキストのみで実行してください。\n"
+        "EN: The connected CLIP does not accept image/video input (text-only "
+        "model). Load a vision-capable Gemma4 or a Qwen3-VL (ComfyUI v0.26.0+) "
+        "with CLIPLoader, or disconnect the image/video input."
+    )
+    _HINT_NOT_GENERATIVE = (
+        "接続された CLIP にテキスト生成機能がありません。"
+        "`CLIPLoader` の type が `gemma4`（または Qwen3-VL 系）になっているか"
+        "確認してください。SD / SDXL / FLUX 用の通常の CLIP ・ T5 では"
+        "動作しません。テキスト生成 API 自体に ComfyUI v0.21.0 以降が必要です。\n"
+        "EN: The connected CLIP has no text-generation capability. Check that "
+        "the CLIPLoader type is `gemma4` (or a Qwen3-VL); ordinary SD/SDXL/FLUX "
+        "CLIP or T5 encoders will not work. The generation API itself requires "
+        "ComfyUI v0.21.0 or later."
+    )
+    _HINT_OOM = (
+        "VRAM不足の可能性があります。`max_frames` を減らす、"
+        "入力画像・動画の解像度を下げる、"
+        "他のモデルをアンロードしてから再実行してください。\n"
+        "EN: Likely out of VRAM. Lower `max_frames`, use a smaller image/video, "
+        "or unload other models before running again."
+    )
+    _HINT_SHAPE = (
+        "モデルと入力の形が合っていません。vision非対応のモデルに"
+        "画像を渡しているか、このノードが想定していないモデル形式の"
+        "可能性があります。`CLIPLoader` の type と、モデルが vision 対応版かを"
+        "確認してください。\n"
+        "EN: Model/input shape mismatch - most often an image fed to a "
+        "non-vision model, or a model layout this node does not support. Check "
+        "the CLIPLoader type and that the model is the vision-capable variant."
+    )
+    _HINT_VIDEO = (
+        "動画の読み込み・デコードに失敗しました。`video` には "
+        "ComfyUI標準 `Load Video` の VIDEO 出力か、VHS系ローダの IMAGE"
+        "（フレームバッチ）出力を接続してください。"
+        "長い動画は全フレームを展開するため、`Trim Video` などで"
+        "短くしてから接続してください。\n"
+        "EN: Could not read/decode the video. Wire either the VIDEO output of "
+        "core `Load Video` or an IMAGE frame batch from a VHS-style loader. "
+        "Long clips are materialized in full - trim them first."
+    )
+    _HINT_GENERIC = (
+        "よくある原因: (1) `CLIPLoader` の type が `gemma4` 以外、または"
+        " vision非対応のモデル、(2) ComfyUI が古い（テキスト生成は"
+        " v0.21.0以降、Qwen3-VL は v0.26.0以降が必要）、(3) VRAM不足。\n"
+        "EN: Common causes: (1) the CLIPLoader type is not `gemma4` / the model "
+        "is not vision-capable, (2) ComfyUI is too old (generation needs "
+        "v0.21.0+, Qwen3-VL needs v0.26.0+), (3) out of VRAM."
+    )
+
+    @classmethod
+    def _error_hint(cls, exc, stage):
+        """Best-guess cause for an exception raised while running this node."""
+        low = str(exc).lower()
+        name = type(exc).__name__.lower()
+
+        # A tokenizer with no image=/video= parameter: a text-only model.
+        if "unexpected keyword argument" in low and (
+            "image" in low or "video" in low
+        ):
+            return cls._HINT_NO_VISION
+        # clip.generate / clip.tokenize / clip.decode missing entirely.
+        if isinstance(exc, AttributeError) and (
+            "generate" in low or "tokenize" in low or "decode" in low
+        ):
+            return cls._HINT_NOT_GENERATIVE
+        if "out of memory" in low or "outofmemory" in name:
+            return cls._HINT_OOM
+        if any(k in low for k in (
+            "size of tensor", "shapes cannot be", "mat1 and mat2",
+            "expected size", "dimension out of range", "must match",
+        )):
+            return cls._HINT_SHAPE
+        if stage == "video":
+            return cls._HINT_VIDEO
+        return cls._HINT_GENERIC
+
+    @classmethod
+    def _fail(cls, exc, stage):
+        """Always raises: the original error, annotated with a likely cause."""
+        label = cls._STAGE_LABELS.get(stage, stage)
+        raise RuntimeError(
+            "[Gemma Image Prompt] 失敗しました / failed"
+            "（段階 / stage: {label}）\n"
+            "原因の可能性 / likely cause: {hint}\n"
+            "元のエラー / original error: {kind}: {msg}".format(
+                label=label,
+                hint=cls._error_hint(exc, stage),
+                kind=type(exc).__name__,
+                msg=exc,
+            )
+        ) from exc
+
+    @classmethod
+    def _check_clip(cls, clip, needs_vision):
+        """Fail early, with a clear reason, on a CLIP this node cannot drive.
+
+        Catching it here (rather than letting an AttributeError surface from
+        somewhere inside the tokenizer) is what turns a wrong CLIPLoader type
+        from a cryptic traceback into an actionable message."""
+        missing = [
+            name for name in ("tokenize", "generate", "decode")
+            if not callable(getattr(clip, name, None))
+        ]
+        if missing:
+            raise RuntimeError(
+                "[Gemma Image Prompt] この CLIP では実行できません / "
+                "unusable CLIP (missing: {miss}).\n"
+                "原因の可能性 / likely cause: {hint}".format(
+                    miss=", ".join(missing), hint=cls._HINT_NOT_GENERATIVE,
+                )
+            )
+        # A vision input is wired: check the tokenizer can take one at all.
+        if needs_vision and not (
+            cls._tokenizer_accepts(clip, "image")
+            or cls._tokenizer_accepts(clip, "images")
+            or cls._tokenizer_accepts(clip, "video")
+            or cls._tokenizer_takes_kwargs(clip)
+        ):
+            raise RuntimeError(
+                "[Gemma Image Prompt] 画像・動画を受け取れない CLIP です / "
+                "this CLIP cannot take an image or video.\n"
+                "原因の可能性 / likely cause: " + cls._HINT_NO_VISION
+            )
+
+    @staticmethod
+    def _tokenizer_takes_kwargs(clip):
+        """True if the tokenizer has a **kwargs catch-all, i.e. the signature
+        cannot tell us whether it understands a visual input (Qwen3-VL).
+        Treated as "might work" so a model that actually runs is never blocked.
+        Also true when the signature is unavailable - never block on a guess."""
+        try:
+            import inspect
+            fn = clip.tokenizer.tokenize_with_weights
+            return any(
+                param.kind is inspect.Parameter.VAR_KEYWORD
+                for param in inspect.signature(fn).parameters.values()
+            )
+        except Exception:
+            return True
+
+    @staticmethod
+    def _unload_models():
+        """Free the session's models from VRAM (best effort)."""
+        try:
+            import comfy.model_management as mm
+            mm.unload_all_models()
+            mm.soft_empty_cache()
+        except Exception:
+            pass
+
     @classmethod
     def _output(cls, positive, negative):
         ui = {"positive": [positive], "negative": [negative]}
@@ -1765,6 +1936,10 @@ class GemmaImagePrompt(BaseNodeClass):
         if not image_present and not video_present and not instr.strip():
             return cls._output("", "")
 
+        # Wrong CLIPLoader type / text-only model: say so before touching it.
+        cls._check_clip(clip, image_present or video_present)
+
+        stage = "video"
         try:
             # Frame selection first: the chosen frames are not evenly spaced, so
             # the request has to state how many there are and where they sit.
@@ -1781,29 +1956,32 @@ class GemmaImagePrompt(BaseNodeClass):
                     frame_times = cls._frame_times(indices, fps)
                     frame_count = len(indices)
 
+            stage = "request"
             request = cls._build_request(
                 instr, image_present, output_format, target_model, detail_mode,
                 prompt_mode, video_present=video_present,
                 frame_note=cls._frame_note(frame_count, frame_times),
             )
 
+            stage = "generate"
             raw = cls._generate(
                 clip, request,
                 image if image_present else None,
                 sampled_video, max_length,
             )
+
+            stage = "parse"
             positive, negative = cls._parse_pos_neg(raw)
         except Exception as e:
-            positive = f"[Gemma Image Prompt error] {type(e).__name__}: {e}"
-            negative = ""
+            # Errors are NOT swallowed into the output text any more: they
+            # propagate so the job stops and ComfyUI shows the real traceback.
+            # Still honor unload_after so VRAM is released on the way out.
+            if unload_after:
+                cls._unload_models()
+            cls._fail(e, stage)
 
         if unload_after:
-            try:
-                import comfy.model_management as mm
-                mm.unload_all_models()
-                mm.soft_empty_cache()
-            except Exception:
-                pass
+            cls._unload_models()
 
         return cls._output(positive, negative)
 

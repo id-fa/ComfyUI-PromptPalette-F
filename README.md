@@ -292,6 +292,10 @@ Nodes 2.0モードでは編集モード時の設定行に省略表示されま�
 > 📌 **画像入力なしでも動作**します。その場合は「指示テキストのみ」から画像生成プロンプトを組み立てます（画像認識は行いません）。画像も指示も両方空の場合は空文字を出力します。
 >
 > ⚠️ **注意**: Gemma-4-E4B は指示への追従能力が限られるため、Danbooruタグ形式や `POSITIVE:` / `NEGATIVE:` 形式を完全に守らないことがあります（テスト用ノードです。崩れた場合もパーサが可能な範囲で復元します）。
+>
+> ⚠️ **エラー時はジョブが停止します**: 生成や動画デコードでエラーが起きた場合、エラー内容を出力テキストに流し込むのではなく、そのまま例外として送出されます（ComfyUI 上でジョブが失敗し、通常どおりエラーが表示されます）。
+>
+> 💡 **エラーには原因の推定が付きます**: エラーメッセージには「失敗した段階」「原因の可能性」「元のエラー」が日英併記で出力されます。よくある原因は自動的に判別されます — CLIPLoader の type が `gemma4` 以外（テキスト生成非対応）、vision非対応のテキスト専用モデルに画像・動画を接続、VRAM不足、モデルと入力の不一致、動画のデコード失敗など。CLIP がそもそもテキスト生成に対応していない場合や、画像を受け取れないモデルの場合は、実行前にその旨のエラーで停止します。
 
 ![screenshot](examples/gemma_image_prompt.webp)
 
@@ -724,6 +728,10 @@ Shows an input image to Gemma4 and writes a text-to-image prompt that would gene
 > 📌 **Works without an image too** — in that case the prompt is built from the instruction text alone (no image analysis). If both the image and the instruction are empty, it outputs empty strings.
 >
 > ⚠️ **Note:** Gemma-4-E4B has limited instruction-following, so it may not perfectly honor the Danbooru-tag format or the `POSITIVE:` / `NEGATIVE:` output contract (this is a test node; the parser recovers what it can).
+>
+> ⚠️ **Errors stop the job:** if generation or video decoding fails, the exception propagates instead of being written into the output text — the run fails and ComfyUI reports the error as usual.
+>
+> 💡 **Errors come with a likely cause:** the message states the stage that failed, the likely cause, and the original error (JA + EN). The common ones are detected automatically — a CLIPLoader type other than `gemma4` (no text generation), an image/video wired into a text-only model, out of VRAM, a model/input mismatch, or a video that could not be decoded. If the CLIP cannot generate text at all, or cannot take an image, the node fails with that explanation before it even starts.
 
 Inputs:
 
