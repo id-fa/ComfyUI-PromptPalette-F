@@ -337,7 +337,7 @@ Nodes 2.0モードでは編集モード時の設定行に省略表示されま�
 - 表示名: `Node Value Template`
 - クラス: `NodeValueTemplate`
 
-ComfyUI標準の `Save Image` ノードの `filename_prefix`（`%KSampler.seed%` のような書式）と同じ要領で、他のノードのウィジェット値を `%ノードタイトル.ウィジェット名%` 形式で文字列に埋め込めるノードです。プロンプトやファイル名にseed・cfg・モデル名などを動的に差し込みたいときに使えます。
+ComfyUI標準の `Save Image` ノードの `filename_prefix`（`%KSampler.seed%` のような書式）と同じ要領で、他のノードのウィジェット値を `%ノード名.ウィジェット名%` 形式で文字列に埋め込めるノードです。ノード名には各ノードの **「Node name for S&R」プロパティ**（既定ではクラス名。例：`LoadImage`）またはタイトルが使えます。プロンプトやファイル名にseed・cfg・モデル名などを動的に差し込みたいときに使えます。
 
 ![screenshot](examples/nodevaluetemplate_screenshot.png)
 
@@ -345,7 +345,7 @@ ComfyUI標準の `Save Image` ノードの `filename_prefix`（`%KSampler.seed%`
 
 | 入力 | 型 | 説明 |
 | --- | --- | --- |
-| `template` | STRING | `%ノードタイトル.ウィジェット名%` トークンを含むテキスト。各トークンは、タイトルが一致するノードの該当ウィジェットの現在値に置き換えられます |
+| `template` | STRING | `%ノード名.ウィジェット名%` トークンを含むテキスト。各トークンは、「Node name for S&R」またはタイトルが一致するノードの該当ウィジェットの現在値に置き換えられます |
 
 出力:
 
@@ -359,7 +359,9 @@ ComfyUI標準の `Save Image` ノードの `filename_prefix`（`%KSampler.seed%`
 seed=%KSampler.seed%, cfg=%KSampler.cfg%
 ```
 
-`KSampler` というタイトルのノードの `seed` / `cfg` ウィジェットの値に置き換わります。
+「Node name for S&R」（またはタイトル）が `KSampler` のノードの `seed` / `cfg` ウィジェットの値に置き換わります。
+
+> **🆕 ロケールに依存しない参照（2026-09）**: ComfyUI の表示言語を日本語などに変えるとノードのタイトルは翻訳されます（`Load Image` → `画像を読み込む`）が、各ノードが持つ **「Node name for S&R」プロパティ**（右クリック → プロパティパネルで確認・変更可能。既定値はクラス名 `LoadImage` など）は翻訳されません。トークンはまずこのプロパティで照合し、一致するノードが無いときだけタイトルで照合します（標準の `Save Image` と同じ順序）。`%LoadImage.image%` のように書いておけば、言語設定を変えても解決できます。
 
 ## 日付トークン `%date:format%`
 
@@ -411,9 +413,9 @@ Smarty のように、トークンの値へ修飾子を適用できます。`|` 
 
 トークンを手打ちしなくても、ノード上の **「🔍 ノードの値を挿入…」** ボタンからモーダルを開いて挿入できます。
 
-1. プルダウンから対象を選択します。一覧には **「📅 日付フォーマット」** 項目と、ウィジェットを持つ各ノードのタイトル（自ノードは除外）が並びます
+1. プルダウンから対象を選択します。一覧には **「📅 日付フォーマット」** 項目と、ウィジェットを持つ各ノード（自ノードは除外）が並びます。ノードは「Node name for S&R」の値で表示され、タイトルが異なる場合は `LoadImage  (画像を読み込む)` のように括弧内にタイトルを併記します
 2. 選択に応じて下のリストが切り替わります:
-   - **ノードタイトルを選択** → そのノードのウィジェット名と現在値の一覧
+   - **ノードを選択** → そのノードのウィジェット名と現在値の一覧
    - **「📅 日付フォーマット」を選択** → `%date:…%` のサンプル（`yyyy-MM-dd`、`yyyy-MM-dd_hh-mm-ss` など）とライブプレビューの一覧
 3. 挿入したい行をクリックして選択（ダブルクリックで即挿入＆モーダル維持）
 4. 必要なら **「修飾子」** のプルダウンから修飾子を選び、**「＋ 追加」** で連結します（`firstword` のときだけ区切り文字の入力欄が表示されます）。追加した修飾子はチップとして並び、`✕` で個別に削除できます。プレビュー欄には完成形のトークンが表示されます
@@ -426,9 +428,11 @@ Smarty のように、トークンの値へ修飾子を適用できます。`|` 
 ## 仕組みと注意点
 
 - **トークンの解決はフロントエンド**（`web/node_value_template.js`）が Queue 実行直前に行い、解決済みの文字列をバックエンドへ送信します。`template` ウィジェット自体は元の `%...%` 表記のまま残ります（標準の `Save Image` と同じ仕組み）。
-- **ノードタイトルで照合**します。タイトルを未設定のノードは表示名（例：`KSampler`）が使われます。同じタイトルのノードが複数ある場合は最初に見つかったものを使用します。
+- **照合順序は「Node name for S&R」→ タイトル**です（標準の `Save Image` と同じ）。まず「Node name for S&R」が一致するノードを探し、無ければタイトル（未設定なら表示名）で探します。どちらも複数一致した場合は最初に見つかったものを使用します。
+- 同じ種類のノードが複数あると「Node name for S&R」も同じ値（例：`KSampler`）になります。区別したいときは、プロパティパネルで各ノードの「Node name for S&R」を `Sampler_B` のように付け替えるか、タイトルで参照してください（ただしタイトルが他ノードの「Node name for S&R」と同じ文字列だとそちらが優先されます）。
+- 挿入ヘルパーは、そのトークンが確実にそのノードへ解決される名前だけを候補に出します（同名の 2 つ目以降は S&R 名では出さず、タイトルで到達できる場合のみタイトルで出します）。
 - 参照できるのは**ウィジェット値**のみです（出力値やメタ情報は対象外）。
-- 最初の `.` でタイトルとウィジェット名を分割するため、タイトルに `.` を含む場合は非対応です（`Save Image` と同じ制約）。
+- 最初の `.` でノード名とウィジェット名を分割するため、ノード名（S&R 名・タイトル）に `.` を含む場合は非対応です（`Save Image` と同じ制約）。
 - 解決できなかったトークン（ノードやウィジェットが見つからない場合）は、タイプミスに気づけるよう `%...%` のまま残します。
 - フロントエンドJSが読み込まれない環境では、`template` をそのまま素通しします（トークン未解決）。
 
@@ -771,13 +775,13 @@ Outputs:
 - Display name: `Node Value Template`
 - Class: `NodeValueTemplate`
 
-A string node that lets you embed **other nodes' widget values** using `%NodeTitle.widget%` tokens, exactly like ComfyUI's built-in `Save Image` `filename_prefix` substitution (e.g. `%KSampler.seed%`). Handy when you want to splice a seed, cfg, model name, etc. into a prompt or filename dynamically.
+A string node that lets you embed **other nodes' widget values** using `%NodeName.widget%` tokens, exactly like ComfyUI's built-in `Save Image` `filename_prefix` substitution (e.g. `%KSampler.seed%`). `NodeName` is the node's **"Node name for S&R" property** (defaults to the class name, e.g. `LoadImage`) or its title. Handy when you want to splice a seed, cfg, model name, etc. into a prompt or filename dynamically.
 
 Inputs:
 
 | Input | Type | Description |
 | --- | --- | --- |
-| `template` | STRING | Text containing `%NodeTitle.widget%` tokens. Each token is replaced with the current value of the named widget on the node whose title matches `NodeTitle` |
+| `template` | STRING | Text containing `%NodeName.widget%` tokens. Each token is replaced with the current value of the named widget on the node whose "Node name for S&R" property (or, failing that, title) matches `NodeName` |
 
 Output:
 
@@ -791,7 +795,9 @@ Output:
 seed=%KSampler.seed%, cfg=%KSampler.cfg%
 ```
 
-is replaced with the `seed` / `cfg` widget values of the node titled `KSampler`.
+is replaced with the `seed` / `cfg` widget values of the node whose "Node name for S&R" (or title) is `KSampler`.
+
+> **🆕 Locale-independent references (2026-09)**: switching ComfyUI's display language translates node titles (`Load Image` → `画像を読み込む`), but every node's **"Node name for S&R" property** (right-click → Properties Panel; defaults to the class name such as `LoadImage`) is never translated. Tokens are matched against that property first, and against the title only when no node's S&R name matches — the same order ComfyUI core uses for `Save Image`. Write `%LoadImage.image%` and the token keeps resolving after a language change.
 
 ### Date token `%date:format%`
 
@@ -843,9 +849,9 @@ Smarty-style modifiers post-process a token's value. Separate them with `|`; cha
 
 Instead of typing tokens by hand, click the **"🔍 ノードの値を挿入… / Insert token"** button on the node to open a modal.
 
-1. Pick a target from the dropdown. It lists a **"📅 日付フォーマット" (date format)** entry plus each node title that has widgets (the node itself is excluded).
+1. Pick a target from the dropdown. It lists a **"📅 日付フォーマット" (date format)** entry plus each node that has widgets (the node itself is excluded). Nodes are listed by their "Node name for S&R" value; when the title differs it is shown in parentheses, e.g. `LoadImage  (画像を読み込む)`.
 2. The list below switches based on your choice:
-   - **A node title** → that node's widget names and current values.
+   - **A node** → that node's widget names and current values.
    - **The date-format entry** → `%date:…%` samples (`yyyy-MM-dd`, `yyyy-MM-dd_hh-mm-ss`, etc.) with live previews.
 3. Click a row to select it (double-click inserts immediately and keeps the modal open).
 4. Optionally pick a modifier from the **修飾子 (modifier)** dropdown and click **＋ 追加** to chain it (the separator field only appears for `firstword`). Added modifiers show up as chips you can remove individually with `✕`, and the preview shows the finished token.
@@ -856,9 +862,11 @@ The date-format entry is always available even when there are no other nodes to 
 ### How it works & caveats
 
 - **Tokens are resolved in the frontend** (`web/node_value_template.js`) right before the prompt is queued; the resolved string is what reaches the backend, while the `template` widget keeps the original `%...%` text. This is the same mechanism the built-in `Save Image` uses.
-- **Matching is by node title.** Nodes without a custom title use their display name (e.g. `KSampler`). If multiple nodes share a title, the first one found is used.
+- **Lookup order is "Node name for S&R" → title** (same as the built-in `Save Image`). A node whose S&R property equals the name wins; only when no node matches that way is the title (display name when unset) compared. Within each pass, the first node found is used.
+- Several nodes of the same class share the same S&R name (e.g. `KSampler`). To tell them apart, rename the property per node in the Properties Panel (e.g. `Sampler_B`) or reference them by title (a title that equals some other node's S&R name loses to that node).
+- The insert helper only offers names that are guaranteed to resolve to that node: a second node with a duplicate S&R name is listed by its title only when the title actually reaches it.
 - Only **widget values** can be referenced (not output values or metadata).
-- The title and widget name are split on the **first `.`**, so titles containing a `.` are not supported (same limitation as `Save Image`).
+- The node name and widget name are split on the **first `.`**, so names (S&R or title) containing a `.` are not supported (same limitation as `Save Image`).
 - Unresolvable tokens (node or widget not found) are **left as `%...%`** so you can spot typos.
 - If the frontend JS doesn't load, the node passes the `template` through verbatim (tokens left unresolved).
 

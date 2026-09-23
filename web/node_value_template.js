@@ -21,11 +21,14 @@ import { app } from "../../scripts/app.js";
 // Replace tokens in `template`:
 //   %date:FORMAT%  — current date/time formatted like SaveImage's filename_prefix
 //   %date%         — shorthand for %date:yyyy-MM-dd%
-//   %Title.widget% — current value of the named widget on the node titled Title
+//   %Name.widget%  — current value of the named widget on the node whose
+//                    "Node name for S&R" property (locale-independent class
+//                    name, e.g. LoadImage) — or, failing that, whose title —
+//                    equals Name. Same lookup order as ComfyUI core.
 // Any token may carry Smarty-style modifiers, chained with `|`:
 //   %Title.image|basename%
 //   %Title.image|basename|firstword:'_'%
-// The %Title.widget% part is split on the FIRST dot (titles rarely contain
+// The %Name.widget% part is split on the FIRST dot (names rarely contain
 // dots — SaveImage splits the same way). Unresolvable tokens — unknown node,
 // unknown widget, or an unknown modifier — are left untouched so the user can
 // spot typos.
@@ -195,22 +198,43 @@ function formatDate(format, dt) {
   return result;
 }
 
-// Find the first node whose title matches `title` and return the value of its
-// widget named `prop`. `node.title` falls back to the node type's display name
-// in LiteGraph, which is what the user sees and what SaveImage matches against.
-function lookupWidgetValue(title, prop) {
+// ComfyUI stores each node's class type in this property at creation time
+// (`addProperty("Node name for S&R", this.constructor.type)`). It is NOT
+// localized — `node.title` becomes e.g. "画像を読み込む" under the ja locale,
+// while this stays "LoadImage" — and the user may edit it per node in the
+// properties panel to give a node a stable, unique reference name.
+const SR_PROP = "Node name for S&R";
+
+function srName(n) {
+  const v = n?.properties?.[SR_PROP];
+  return typeof v === "string" && v.trim() !== "" ? v : "";
+}
+
+function titleOf(n) {
+  return n.title || n.type;
+}
+
+function findWidget(n, prop) {
+  return n.widgets?.find((x) => x && x.name === prop);
+}
+
+// Resolve `%name.widget%` exactly like ComfyUI core's applyTextReplacements
+// (SaveImage `filename_prefix`): first look for a node whose
+// "Node name for S&R" property equals `name`; only if NONE matches, fall back
+// to the node title. Within each pass the first matching node wins.
+function findReferencedNode(name) {
   const nodes = app.graph?._nodes || [];
-  for (const n of nodes) {
-    const nodeTitle = n.title || n.type;
-    if (nodeTitle !== title) {
-      continue;
-    }
-    const w = n.widgets?.find((x) => x.name === prop);
-    if (w) {
-      return w.value;
-    }
-  }
-  return undefined;
+  const bySR = nodes.find((n) => srName(n) === name);
+  if (bySR) return bySR;
+  return nodes.find((n) => titleOf(n) === name);
+}
+
+// Value of the widget named `prop` on the node that `%name.widget%` refers to.
+function lookupWidgetValue(name, prop) {
+  const n = findReferencedNode(name);
+  if (!n) return undefined;
+  const w = findWidget(n, prop);
+  return w ? w.value : undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -527,17 +551,33 @@ function resolveCaret(node) {
   return { ta, start: rec.start, end: rec.start };
 }
 
-// Map of title -> first node with that title (matching the resolver, which
-// uses the first match). Only nodes that have named widgets and aren't `self`.
+// Map of reference name -> { node, title, sr } for the picker. The key is the
+// text the inserted token will use, chosen so that `findReferencedNode(key)`
+// resolves to exactly that node:
+//   - the node's "Node name for S&R" (locale-independent) when this node is
+//     the first one carrying that name;
+//   - otherwise its title, when no other node's S&R name equals that title
+//     and no earlier node already claimed the title (the resolver's fallback
+//     pass — this is how a second KSampler renamed "Sampler B" stays reachable).
+// Only nodes that have named widgets; `self` excluded.
 function collectTitleMap(selfNode) {
   const nodes = app.graph?._nodes || [];
   const map = new Map();
+  const srTaken = new Set(nodes.map(srName).filter(Boolean));
   for (const n of nodes) {
     if (n === selfNode) continue;
     const widgets = (n.widgets || []).filter((w) => w && w.name);
     if (widgets.length === 0) continue;
-    const title = n.title || n.type;
-    if (!map.has(title)) map.set(title, n);
+    const sr = srName(n);
+    const title = titleOf(n);
+    let key = "";
+    if (sr && findReferencedNode(sr) === n) {
+      key = sr;
+    } else if (!srTaken.has(title) && findReferencedNode(title) === n) {
+      key = title;
+    }
+    if (!key || map.has(key)) continue;
+    map.set(key, { node: n, title, sr });
   }
   return map;
 }
@@ -793,9 +833,12 @@ function openTokenPicker(node) {
 
   // Node titles (only nodes that have widgets; self excluded — see collectTitleMap).
   for (const t of titles) {
+    const entry = titleMap.get(t);
     const opt = document.createElement("option");
     opt.value = t;
-    opt.textContent = t;
+    // Key is the S&R name (locale-independent); show the localized/custom
+    // title beside it so the user can still recognize the node.
+    opt.textContent = entry.title !== t ? `${t}  (${entry.title})` : t;
     titleSelect.appendChild(opt);
   }
   selectRowEl.appendChild(titleLabel);
@@ -909,10 +952,10 @@ function openTokenPicker(node) {
   function renderProps(title) {
     clearList();
     if (!title) {
-      showHint("ノードタイトルまたは日付フォーマットを選択してください。");
+      showHint("ノード（Node name for S&R / タイトル）または日付フォーマットを選択してください。");
       return;
     }
-    const targetNode = titleMap.get(title);
+    const targetNode = titleMap.get(title)?.node;
     const widgets = (targetNode?.widgets || []).filter((w) => w && w.name);
     if (widgets.length === 0) {
       showHint("このノードには参照できるウィジェットがありません。");
