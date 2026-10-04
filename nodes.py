@@ -669,6 +669,10 @@ class NodeValueTemplate(BaseNodeClass):
     template (tokens left intact) instead of crashing.
     """
 
+    _ON_MISSING_OPTIONS = ["Leave as-is", "Empty string", "Error (stop the job)"]
+    # Must match MISSING_SENTINEL in web/node_value_template.js.
+    _MISSING_SENTINEL = "\x01NVT_MISSING\x01"
+
     if V3_AVAILABLE:
         @classmethod
         def define_schema(cls):
@@ -681,6 +685,12 @@ class NodeValueTemplate(BaseNodeClass):
                         "template",
                         default="",
                         multiline=True,
+                    ),
+                    io.Combo.Input(
+                        "on_missing",
+                        options=cls._ON_MISSING_OPTIONS,
+                        default=cls._ON_MISSING_OPTIONS[0],
+                        optional=True,
                     ),
                 ],
                 outputs=[
@@ -704,6 +714,19 @@ class NodeValueTemplate(BaseNodeClass):
                     ),
                 }),
             },
+            "optional": {
+                "on_missing": ("COMBO", {
+                    "options": cls._ON_MISSING_OPTIONS,
+                    "default": cls._ON_MISSING_OPTIONS[0],
+                    "tooltip": (
+                        "What to do with a %Node.widget% token whose node or "
+                        "widget does not exist in the graph. Leave as-is: keep "
+                        "the token text. Empty string: replace it with nothing. "
+                        "Error: stop the job and report the token (an unknown "
+                        "modifier is reported too)."
+                    ),
+                }),
+            },
         }
 
     RETURN_TYPES = ("STRING",)
@@ -712,12 +735,24 @@ class NodeValueTemplate(BaseNodeClass):
     CATEGORY = "Prompt Palette-F"
 
     @classmethod
-    def execute(cls, template=""):
+    def execute(cls, template="", on_missing="Leave as-is"):
         # The frontend has already replaced %Title.widget% tokens in the value
-        # that reaches us, so this is a straight pass-through. Coerce non-string
+        # that reaches us (it also applies `on_missing` — unused here), so
+        # this is a straight pass-through. Coerce non-string
         # values defensively (a wrong-typed widget shouldn't crash the node).
         if not isinstance(template, str):
             template = ""
+        # In "Error" mode the frontend reports unresolvable tokens by sending
+        # the sentinel + token list instead of the text; fail the job here so
+        # ComfyUI shows it as a normal node error.
+        if template.startswith(cls._MISSING_SENTINEL):
+            tokens = [t for t in template[len(cls._MISSING_SENTINEL):].split("\x01") if t]
+            raise RuntimeError(
+                "[Node Value Template] 解決できないトークンがあります / "
+                "unresolved token(s): " + ", ".join(tokens) + "\n"
+                "ノード名・ウィジェット名・修飾子を確認するか、on_missing を変更してください / "
+                "check the node name, widget name and modifiers, or change on_missing."
+            )
         if V3_AVAILABLE:
             return io.NodeOutput(template)
         else:

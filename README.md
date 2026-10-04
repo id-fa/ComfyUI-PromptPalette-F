@@ -346,6 +346,7 @@ ComfyUI標準の `Save Image` ノードの `filename_prefix`（`%KSampler.seed%`
 | 入力 | 型 | 説明 |
 | --- | --- | --- |
 | `template` | STRING | `%ノード名.ウィジェット名%` トークンを含むテキスト。各トークンは、「Node name for S&R」またはタイトルが一致するノードの該当ウィジェットの現在値に置き換えられます |
+| `on_missing` | COMBO | 参照先の**ノードまたはウィジェットが存在しない**トークンの扱い。`Leave as-is`（`%...%` のまま残す・デフォルト）／`Empty string`（空文字にする）／`Error (stop the job)`（エラーでジョブを停止） |
 
 出力:
 
@@ -434,6 +435,9 @@ Smarty のように、トークンの値へ修飾子を適用できます。`|` 
 - 参照できるのは**ウィジェット値**のみです（出力値やメタ情報は対象外）。
 - 最初の `.` でノード名とウィジェット名を分割するため、ノード名（S&R 名・タイトル）に `.` を含む場合は非対応です（`Save Image` と同じ制約）。
 - 解決できなかったトークン（ノードやウィジェットが見つからない場合）は、タイプミスに気づけるよう `%...%` のまま残します。
+- **`on_missing` で挙動を変更できます**:
+  - `Empty string` — 参照先のノードまたはウィジェットが見つからないトークンは空文字になります（修飾子付きでも空文字）。外すことがあるノードを参照するテンプレート向けです。値は解決できたが修飾子が未知の場合は `%...%` のまま残ります。
+  - `Error (stop the job)` — 解決できないトークン（ノード・ウィジェットが見つからない、または未知の修飾子）が 1 つでもあると、このノードがエラーになりジョブが停止します。エラーメッセージに該当トークンが表示されます。停止するのはこのノードの実行時点なので、それより前に実行されるノードは動きます。
 - フロントエンドJSが読み込まれない環境では、`template` をそのまま素通しします（トークン未解決）。
 
 # 関連
@@ -782,6 +786,7 @@ Inputs:
 | Input | Type | Description |
 | --- | --- | --- |
 | `template` | STRING | Text containing `%NodeName.widget%` tokens. Each token is replaced with the current value of the named widget on the node whose "Node name for S&R" property (or, failing that, title) matches `NodeName` |
+| `on_missing` | COMBO | What to do with a token whose **node or widget does not exist**: `Leave as-is` (keep `%...%`, default) / `Empty string` / `Error (stop the job)` |
 
 Output:
 
@@ -868,5 +873,8 @@ The date-format entry is always available even when there are no other nodes to 
 - Only **widget values** can be referenced (not output values or metadata).
 - The node name and widget name are split on the **first `.`**, so names (S&R or title) containing a `.` are not supported (same limitation as `Save Image`).
 - Unresolvable tokens (node or widget not found) are **left as `%...%`** so you can spot typos.
+- **`on_missing` changes that**:
+  - `Empty string` — a token whose node or widget cannot be found becomes an empty string (modifiers included) — meant for templates that reference nodes you sometimes remove. An unknown modifier on a token that does resolve is still left as `%...%`.
+  - `Error (stop the job)` — if any token is unresolvable (node or widget not found, or an unknown modifier), this node raises an error and the job stops; the message lists the offending tokens. The stop happens when this node executes, so nodes that run before it still run.
 - If the frontend JS doesn't load, the node passes the `template` through verbatim (tokens left unresolved).
 

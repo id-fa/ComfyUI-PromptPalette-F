@@ -877,6 +877,23 @@ class TestNodeValueTemplate(unittest.TestCase):
         (out,) = NodeValueTemplate.execute(template=123)  # type: ignore[arg-type]
         self.assertEqual(out, "")
 
+    def test_on_missing_is_frontend_only(self):
+        # The mode is applied by the frontend resolver; the backend accepts
+        # it and still passes the template through untouched.
+        for mode in NodeValueTemplate._ON_MISSING_OPTIONS:
+            (out,) = NodeValueTemplate.execute(
+                template="%Gone.seed%/img", on_missing=mode)
+            self.assertEqual(out, "%Gone.seed%/img")
+        self.assertIn("on_missing", NodeValueTemplate.INPUT_TYPES()["optional"])
+
+    def test_missing_sentinel_stops_the_job(self):
+        # "Error" mode: the frontend sends the sentinel + unresolved tokens.
+        payload = (NodeValueTemplate._MISSING_SENTINEL
+                   + "%Gone.seed%\x01%KSampler.nope%")
+        with self.assertRaises(RuntimeError) as cm:
+            NodeValueTemplate.execute(template=payload)
+        self.assertIn("%Gone.seed%, %KSampler.nope%", str(cm.exception))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

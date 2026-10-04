@@ -31,11 +31,37 @@ import { app } from "../../scripts/app.js";
 // The %Name.widget% part is split on the FIRST dot (names rarely contain
 // dots — SaveImage splits the same way). Unresolvable tokens — unknown node,
 // unknown widget, or an unknown modifier — are left untouched so the user can
-// spot typos.
-function resolveTemplate(template) {
+// spot typos. The node's `on_missing` combo changes that (`mode`):
+//   "keep"  — the default described above
+//   "empty" — a token whose node OR widget does not exist resolves to "" (for
+//             templates that reference optional nodes). An unknown modifier on
+//             a token that does resolve is still a typo and stays visible.
+//   "error" — any unresolvable token (node, widget or modifier) makes the
+//             whole result MISSING_SENTINEL + the offending tokens, which the
+//             backend turns into an exception so the job stops with the normal
+//             ComfyUI node error.
+const MISSING_SENTINEL = "\u0001NVT_MISSING\u0001";
+
+function missingMode(value) {
+  const s = String(value ?? "").toLowerCase();
+  if (s.includes("error")) return "error";
+  if (s.includes("empty")) return "empty";
+  return "keep";
+}
+
+function resolveTemplate(template, mode = "keep") {
   if (typeof template !== "string" || template.indexOf("%") === -1) {
     return template;
   }
+  const missing = [];
+  const resolved = resolveTokens(template, mode, missing);
+  if (mode === "error" && missing.length > 0) {
+    return MISSING_SENTINEL + missing.join("\u0001");
+  }
+  return resolved;
+}
+
+function resolveTokens(template, mode, missing) {
   return template.replace(/%([^%]+)%/g, (match, inner) => {
     const parts = splitModifiers(inner);
     const base = parts[0].trim();
@@ -55,7 +81,10 @@ function resolveTemplate(template) {
       const prop = base.slice(dot + 1).trim();
       const raw = lookupWidgetValue(title, prop);
       if (raw === undefined || raw === null) {
-        return match; // node/widget not found → leave the token visible
+        // node/widget not found → leave the token visible, or blank it in
+        // "empty" mode (modifiers are moot either way)
+        missing.push(match);
+        return mode === "empty" ? "" : match;
       }
       value = String(raw);
     }
@@ -63,6 +92,7 @@ function resolveTemplate(template) {
     for (let i = 1; i < parts.length; i++) {
       const next = applyModifierSpec(value, parts[i]);
       if (next === undefined) {
+        missing.push(match);
         return match; // unknown/invalid modifier → leave the token visible
       }
       value = next;
@@ -1099,7 +1129,9 @@ app.registerExtension({
               // Prefer the live widget value; fall back to whatever serialized
               // into the prompt (covers any future widget-hiding scenario).
               const raw = widget ? widget.value : nodeData.inputs.template;
-              nodeData.inputs.template = resolveTemplate(raw);
+              const modeWidget = node?.widgets?.find((w) => w.name === "on_missing");
+              const mode = missingMode(modeWidget ? modeWidget.value : nodeData.inputs.on_missing);
+              nodeData.inputs.template = resolveTemplate(raw, mode);
             }
           }
         } catch (e) {
