@@ -132,6 +132,53 @@ class TestGemmaTranslate(unittest.TestCase):
         self.assertIn("Gemma Translate error", translated)
         self.assertIn("model exploded", translated)
 
+    def test_reasoning_block_is_stripped(self):
+        # Qwen tokenizers decode <think> as plain text; it must not reach the
+        # translated output.
+        clip = _FakeClip(raw="<think>\nthe user wants English\n</think>\n\nHello world")
+        _, translated = GemmaTranslate.execute(clip, text="こんにちは")["result"]
+        self.assertEqual(translated, "Hello world")
+
+    def test_think_tag_inside_the_answer_is_kept(self):
+        # Only a block that OPENS the text is reasoning.
+        clip = _FakeClip(raw="The tag </think> closes a block")
+        _, translated = GemmaTranslate.execute(clip, text="x")["result"]
+        self.assertEqual(translated, "The tag </think> closes a block")
+
+    def test_unclosed_reasoning_is_reported(self):
+        clip = _FakeClip(raw="<think>\nstill thinking when max_length ran out")
+        _, translated = GemmaTranslate.execute(clip, text="x")["result"]
+        self.assertIn("Gemma Translate error", translated)
+        self.assertIn("max_length", translated)
+
+    def test_generation_disables_mtp(self):
+        # Qwen3.5/3.6/3.8 MTP speculative decoding garbles text-only prompts.
+        seen = {}
+
+        class _Clip(_FakeClip):
+            def generate(self, tokens, **kwargs):
+                seen.update(kwargs)
+                return [1]
+
+        GemmaTranslate.execute(_Clip(raw="ok"), text="x")
+        self.assertIs(seen.get("mtp"), False)
+        self.assertIs(seen.get("do_sample"), False)
+
+    def test_generation_without_mtp_argument_still_works(self):
+        # A ComfyUI build whose clip.generate has no mtp= parameter.
+        seen = {}
+
+        class _Clip(_FakeClip):
+            def generate(self, tokens, do_sample=True, max_length=256,
+                         temperature=1.0, top_k=50, top_p=0.95, min_p=0.0,
+                         repetition_penalty=1.0, seed=None, presence_penalty=0.0):
+                seen["do_sample"] = do_sample
+                return [1]
+
+        _, translated = GemmaTranslate.execute(_Clip(raw="ok"), text="x")["result"]
+        self.assertEqual(translated, "ok")
+        self.assertIs(seen["do_sample"], False)
+
     def test_clean_translation_helper(self):
         self.assertEqual(GemmaTranslate._clean_translation("  hi  "), "hi")
         self.assertEqual(GemmaTranslate._clean_translation('"quoted"'), "quoted")
@@ -307,6 +354,20 @@ class TestGemmaImagePrompt(unittest.TestCase):
         positive, negative = GemmaImagePrompt.execute(clip, image=object())["result"]
         self.assertEqual(positive, "just a plain prompt with no labels")
         self.assertEqual(negative, "")
+
+    def test_reasoning_block_is_stripped(self):
+        clip = _FakeVisionClip(
+            raw="<think>\nPOSITIVE: a draft idea\n</think>\n\n"
+                "POSITIVE: a cat sitting on a sofa\nNEGATIVE:")
+        positive, negative = GemmaImagePrompt.execute(clip, image=object())["result"]
+        self.assertEqual(positive, "a cat sitting on a sofa")
+        self.assertEqual(negative, "")
+
+    def test_unclosed_reasoning_stops_the_job(self):
+        clip = _FakeVisionClip(raw="<think>\nstill thinking when max_length ran out")
+        with self.assertRaises(RuntimeError) as ctx:
+            GemmaImagePrompt.execute(clip, image=object())
+        self.assertIn("max_length", str(ctx.exception))
 
     def test_generation_error_propagates(self):
         # Errors must stop the job instead of being written into the output.

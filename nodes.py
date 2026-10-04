@@ -867,6 +867,68 @@ class PromptTabsTranslate(BaseNodeClass):
             return (text, translated, label)
 
 
+class _PPFReasoningCutOff(RuntimeError):
+    """The model spent the whole max_length budget inside a <think> block."""
+
+
+_PPF_REASONING_CUT_OFF_MSG = (
+    "モデルが思考（<think>）の途中で max_length に達し、回答が出力されません"
+    "でした。`max_length` を増やすか、思考を行わないモデルを使ってください。\n"
+    "EN: The model ran out of max_length while still reasoning (<think>), so "
+    "no answer was produced. Raise `max_length` or use a non-thinking model."
+)
+
+
+def _ppf_strip_reasoning(text):
+    """Drop a leading <think>...</think> block from generated text.
+
+    The Qwen tokenizers (Qwen3, Qwen3.5 / 3.6 / 3.8, Qwen3-VL) keep <think> and
+    </think> as ordinary tokens, so they survive clip.decode(); Gemma4's decode
+    rewrites its thought channel into the same tags. We always ask for
+    thinking=False, but a model that reasons anyway would otherwise leak its
+    reasoning into the output. Same rule as ComfyUI's TextGenerate node: only a
+    block that OPENS the text counts as reasoning. A block that never closes
+    means max_length cut the model off before it answered - that raises."""
+    if not isinstance(text, str):
+        return text
+    reasoning, closed, answer = text.partition("</think>")
+    if not reasoning.lstrip().startswith("<think>"):
+        return text
+    if not closed:
+        raise _PPFReasoningCutOff(_PPF_REASONING_CUT_OFF_MSG)
+    return answer.strip()
+
+
+def _ppf_generate_ids(clip, tokens, max_length):
+    """clip.generate with the fixed (greedy) settings both Gemma nodes use.
+
+    mtp=False turns off speculative decoding with the checkpoint's
+    multi-token-prediction head (Qwen3.5 / 3.6 / 3.8 checkpoints that ship
+    one). ComfyUI enables it by default for text-only prompts, where it can
+    return degenerate repeated text or abort on the CUDA graph capture; it is
+    only a speed-up, so these nodes do without it. Older ComfyUI builds have no
+    mtp / extended keyword arguments, hence the TypeError fallbacks."""
+    settings = dict(
+        do_sample=False,
+        max_length=int(max_length),
+        temperature=0.7,
+        top_k=40,
+        top_p=0.9,
+        min_p=0.0,
+        repetition_penalty=1.0,
+        presence_penalty=0.0,
+        seed=0,
+    )
+    try:
+        return clip.generate(tokens, mtp=False, **settings)
+    except TypeError:
+        pass
+    try:
+        return clip.generate(tokens, **settings)
+    except TypeError:
+        return clip.generate(tokens, max_length=int(max_length))
+
+
 class GemmaTranslate(BaseNodeClass):
     """Translate text with a Gemma4 text encoder loaded via CLIPLoader.
 
@@ -999,24 +1061,10 @@ class GemmaTranslate(BaseNodeClass):
         except TypeError:
             tokens = clip.tokenize(instruction)
 
-        try:
-            generated_ids = clip.generate(
-                tokens,
-                do_sample=False,
-                max_length=int(max_length),
-                temperature=0.7,
-                top_k=40,
-                top_p=0.9,
-                min_p=0.0,
-                repetition_penalty=1.0,
-                presence_penalty=0.0,
-                seed=0,
-            )
-        except TypeError:
-            generated_ids = clip.generate(tokens, max_length=int(max_length))
+        generated_ids = _ppf_generate_ids(clip, tokens, max_length)
 
         out = clip.decode(generated_ids)
-        return out if isinstance(out, str) else str(out)
+        return _ppf_strip_reasoning(out if isinstance(out, str) else str(out))
 
     @classmethod
     def _output(cls, source, translated):
@@ -1760,24 +1808,10 @@ class GemmaImagePrompt(BaseNodeClass):
             except TypeError:
                 tokens = clip.tokenize(prompt)
 
-        try:
-            generated_ids = clip.generate(
-                tokens,
-                do_sample=False,
-                max_length=int(max_length),
-                temperature=0.7,
-                top_k=40,
-                top_p=0.9,
-                min_p=0.0,
-                repetition_penalty=1.0,
-                presence_penalty=0.0,
-                seed=0,
-            )
-        except TypeError:
-            generated_ids = clip.generate(tokens, max_length=int(max_length))
+        generated_ids = _ppf_generate_ids(clip, tokens, max_length)
 
         out = clip.decode(generated_ids)
-        return out if isinstance(out, str) else str(out)
+        return _ppf_strip_reasoning(out if isinstance(out, str) else str(out))
 
     # --- Error reporting -----------------------------------------------------
     # Failures stop the job (they are no longer written into the output text),
@@ -1798,19 +1832,19 @@ class GemmaImagePrompt(BaseNodeClass):
     _HINT_NO_VISION = (
         "接続された CLIP は画像・動画の入力に対応していません"
         "（vision非対応のテキスト専用モデル）。`CLIPLoader` で vision 対応の"
-        " Gemma4 か Qwen3-VL（ComfyUI v0.26.0以降）を読み込むか、"
+        " Gemma4 か Qwen系（Qwen3-VL / Qwen3.5・3.6・3.8）を読み込むか、"
         "`image` / `video` の接続を外して指示テキストのみで実行してください。\n"
         "EN: The connected CLIP does not accept image/video input (text-only "
-        "model). Load a vision-capable Gemma4 or a Qwen3-VL (ComfyUI v0.26.0+) "
+        "model). Load a vision-capable Gemma4 or a Qwen (Qwen3-VL / Qwen3.5, 3.6, 3.8) "
         "with CLIPLoader, or disconnect the image/video input."
     )
     _HINT_NOT_GENERATIVE = (
         "接続された CLIP にテキスト生成機能がありません。"
-        "`CLIPLoader` の type が `gemma4`（または Qwen3-VL 系）になっているか"
+        "`CLIPLoader` で Gemma4（type `gemma4`）か Qwen系（Qwen3-VL / Qwen3.5・3.6・3.8）を読み込んでいるか"
         "確認してください。SD / SDXL / FLUX 用の通常の CLIP ・ T5 では"
         "動作しません。テキスト生成 API 自体に ComfyUI v0.21.0 以降が必要です。\n"
         "EN: The connected CLIP has no text-generation capability. Check that "
-        "the CLIPLoader type is `gemma4` (or a Qwen3-VL); ordinary SD/SDXL/FLUX "
+        "the CLIPLoader loads a Gemma4 (type `gemma4`) or a Qwen (Qwen3-VL / Qwen3.5, 3.6, 3.8); ordinary SD/SDXL/FLUX "
         "CLIP or T5 encoders will not work. The generation API itself requires "
         "ComfyUI v0.21.0 or later."
     )
@@ -1854,6 +1888,10 @@ class GemmaImagePrompt(BaseNodeClass):
         """Best-guess cause for an exception raised while running this node."""
         low = str(exc).lower()
         name = type(exc).__name__.lower()
+
+        # The message of this one already is the cause.
+        if isinstance(exc, _PPFReasoningCutOff):
+            return str(exc)
 
         # A tokenizer with no image=/video= parameter: a text-only model.
         if "unexpected keyword argument" in low and (

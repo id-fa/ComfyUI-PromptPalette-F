@@ -248,6 +248,8 @@ Nodes 2.0モードでは編集モード時の設定行に省略表示されま�
 > ✅ **動作確認済みモデル**: `gemma4_e4b_it_fp8_scaled.safetensors`（現時点で動作確認が取れているモデルです）
 
 > 🆕 **Qwen3-VL対応（ComfyUI v0.26.0以降）**: ComfyUI v0.26.0でQwenのVLモデルがサポートされたため、Gemma4の代わりに **Qwen3-VL** も同じ要領で使えます（`CLIPLoader` で読み込み、`clip` 入力に接続）。コードの変更は不要で、動作を確認済みです。Qwen3-VLを使う場合は **ComfyUI v0.26.0以降**が必要です。
+>
+> 🆕 **Qwen3.5 / 3.6 / 3.8 対応**: ComfyUI本体がQwen3.5系として読み込むモデル（Qwen3.5・3.6・3.8）も同じ要領で使えます。Qwen3.8 27B（ComfyUI v0.38.0）で動作を確認済みです。これらのモデルが持つMTP（投機的デコード）は、テキストのみの入力で出力が崩れたりComfyUIごと落ちたりすることがあるため、このノードでは使いません（`mtp=False`）。また、モデルが `<think>…</think>` の思考を出力した場合は自動で取り除きます。
 
 > 📌 **実行のしかた**: このノードはモデルがワークフロー実行中にしか存在しないため、`Prompt Tabs + Translate` のような「ボタンで即時翻訳」はできません。**Queue Prompt（ワークフロー実行）時に翻訳が走り**、結果がノードの翻訳欄に表示されます。CLIP接続が必須なので単独実行はできません（翻訳専用ワークフローでの利用を想定）。
 
@@ -284,6 +286,8 @@ Nodes 2.0モードでは編集モード時の設定行に省略表示されま�
 > ⚠️ **実験的ノードです。** `Gemma Translate` と同じく Gemma4 のテキスト生成機能を使うため **ComfyUI v0.21.0 以降が必要**です。さらに**画像認識（vision）対応の Gemma4 モデル**を使う必要があります。
 
 > 🆕 **Qwen3-VL対応（ComfyUI v0.26.0以降）**: ComfyUI v0.26.0でQwenのVLモデルがサポートされたため、vision対応のGemma4の代わりに **Qwen3-VL**（画像認識対応）も同じ要領で使えます（`CLIPLoader` で読み込み、`clip` 入力に接続）。コードの変更は不要で、動作を確認済みです。Qwen3-VLを使う場合は **ComfyUI v0.26.0以降**が必要です。
+>
+> 🆕 **Qwen3.5 / 3.6 / 3.8 対応**: ComfyUI本体がQwen3.5系として読み込むモデル（Qwen3.5・3.6・3.8）も同じ要領で使えます。Qwen3.8 27B（ComfyUI v0.38.0）で動作を確認済みです。これらのモデルが持つMTP（投機的デコード）は、テキストのみの入力で出力が崩れたりComfyUIごと落ちたりすることがあるため、このノードでは使いません（`mtp=False`）。また、モデルが `<think>…</think>` の思考を出力した場合は自動で取り除きます。
 
 入力画像をGemma4に「見せて」、それに似た画像を生成するための text-to-image プロンプトを出力するノードです。修正指示を受け付けて反映し、想定する生成モデルや出力形式に合わせてプロンプトを調整します。画像認識→生成は、`Gemma Translate` と同様に**ワークフロー実行（Queue Prompt）時**に走ります。
 
@@ -692,6 +696,8 @@ Place the model in `ComfyUI/models/text_encoders/`.
 > ✅ **Confirmed working model**: `gemma4_e4b_it_fp8_scaled.safetensors` (currently verified to work).
 
 > 🆕 **Qwen3-VL support (ComfyUI v0.26.0+):** ComfyUI v0.26.0 added support for Qwen's VL models, so you can also use **Qwen3-VL** in place of Gemma4 in exactly the same way (load it with a `CLIPLoader` and wire it into the `clip` input). No code changes are required — this is verified to work. Using Qwen3-VL requires **ComfyUI v0.26.0 or later**.
+>
+> 🆕 **Qwen3.5 / 3.6 / 3.8 support:** models that ComfyUI loads through its Qwen3.5 family (Qwen3.5, 3.6, 3.8) work the same way; verified with Qwen3.8 27B on ComfyUI v0.38.0. Their MTP (speculative decoding) head can garble text-only output or abort ComfyUI, so this node does not use it (`mtp=False`). A `<think>…</think>` reasoning block, if the model emits one, is stripped automatically.
 
 > 📌 **How it runs:** because the model only exists during workflow execution, this node cannot translate instantly on a button click like `Prompt Tabs + Translate`. Translation runs **when you Queue Prompt**, and the result appears in the node's translated field. It needs a connected CLIP, so it can't run on its own (intended for a dedicated translation workflow).
 
@@ -728,6 +734,8 @@ Outputs:
 > ⚠️ **This is an experimental node.** Like `Gemma Translate` it uses Gemma4 text generation, so it **requires ComfyUI v0.21.0 or later** — and additionally a **vision-capable Gemma4 model**.
 
 > 🆕 **Qwen3-VL support (ComfyUI v0.26.0+):** ComfyUI v0.26.0 added support for Qwen's VL models, so you can also use **Qwen3-VL** (which is vision-capable) in place of the vision Gemma4 model in exactly the same way (load it with a `CLIPLoader` and wire it into the `clip` input). No code changes are required — this is verified to work. Using Qwen3-VL requires **ComfyUI v0.26.0 or later**.
+>
+> 🆕 **Qwen3.5 / 3.6 / 3.8 support:** models that ComfyUI loads through its Qwen3.5 family (Qwen3.5, 3.6, 3.8) work the same way; verified with Qwen3.8 27B on ComfyUI v0.38.0. Their MTP (speculative decoding) head can garble text-only output or abort ComfyUI, so this node does not use it (`mtp=False`). A `<think>…</think>` reasoning block, if the model emits one, is stripped automatically.
 
 Shows an input image to Gemma4 and writes a text-to-image prompt that would generate a visually similar image. It applies your free-form modification instructions and adjusts the prompt for the intended generation model and output style. As with `Gemma Translate`, the analysis/generation runs **when you Queue Prompt**.
 
