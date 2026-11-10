@@ -335,6 +335,59 @@ Nodes 2.0モードでは編集モード時の設定行に省略表示されま�
 
 ---
 
+# PlamoTranslate-F
+
+- カテゴリ: `PromptPalette-F`
+- 表示名: `PlamoTranslate-F`
+- クラス: `PlamoTranslate_F`
+
+Preferred Networks の翻訳専用モデル **[pfnet/plamo-3-translate-0.8b](https://huggingface.co/pfnet/plamo-3-translate-0.8b)** を `transformers` でローカル実行する翻訳ノードです。`Gemma Translate` と違って **`CLIPLoader` は不要**で、モデルは**初回実行時に自動ダウンロード**されます（約 1.8 GB、保存先は `ComfyUI/models/LLM/plamo-3-translate-0.8b/`）。翻訳元の言語はモデルが自動判定します（53 言語対応）。翻訳先は日本語 / 英語 / 中国語（簡体字・繁体字）です。
+
+> 📌 **実行のしかた**: `Gemma Translate` と同じく **Queue Prompt（ワークフロー実行）時に翻訳が走り**、結果がノードの翻訳欄に表示されます。モデルは一度読み込むと ComfyUI を終了するまで保持されます（`unload_after` で実行ごとに解放できます）。VRAM 使用量は bf16 で約 1.8 GB、翻訳 1 回は 0.3〜1.5 秒程度です。
+
+> ⚠️ **ライセンス**: モデルは [PLaMo Community License](https://huggingface.co/pfnet/plamo-3-translate-0.8b) です。個人・非商用利用は無償ですが、商用利用には条件があります（売上規模に応じて登録または別途契約）。利用前にライセンスを確認してください。
+
+> 🔧 **追加インストール不要**: `transformers` と `huggingface_hub` は ComfyUI 本体の依存関係に含まれています。モデル同梱のトークナイザは `numba` を要求しますが、`numba` が無い／壊れている環境では自動的に純 Python で動作します（速度はプロンプト用途なら十分です）。
+
+| 操作 | 方法 |
+| --- | --- |
+| 翻訳 | `target_language` を選んで **Queue Prompt**（実行後、翻訳欄に結果が反映されます） |
+| 入れ替え | `⇅ 入れ替え` ボタンで元テキストと翻訳テキストを交換 |
+
+入力:
+
+| 入力 | 型 | 説明 |
+| --- | --- | --- |
+| `text` | STRING | 翻訳する元テキスト（言語は自動判定） |
+| `target_language` | 選択 | 翻訳先（`Japanese` / `English` / `Chinese (Simplified)` / `Chinese (Traditional)`） |
+| `d_tag_mode` | 選択 | `<d>…</d>` ブロック（Minimax H3 用プロンプトなどで使われる）の扱い。`Exclude and restore`（デフォルト）: ブロックの外側だけを翻訳し、ブロックは元の位置にそのまま戻す。`Remove`: ブロックを削除してから翻訳。`Translate as text`: タグごとモデルに渡す |
+| `japanese_form` | 選択 | 日本語出力の文体（`Default` / `Polite (です・ます)` / `Plain (だ・である)`）。翻訳先が日本語のときだけ有効 |
+| `max_new_tokens` | INT | 生成する最大トークン数（デフォルト: 512） |
+| `use_cache` | BOOLEAN | ON（デフォルト）で、同じテキスト・同じ設定の翻訳結果をメモリ内キャッシュから返します（ComfyUI 再起動で消えます） |
+| `unload_after` | BOOLEAN | ON で翻訳後にモデルを VRAM から解放します。次回実行時に再読み込み（約 2 秒）します（デフォルト OFF） |
+| `device` | 選択 | `auto`: ComfyUI の GPU（bf16）。`cpu`: CPU で実行（fp32、遅いが VRAM を使いません） |
+
+出力:
+
+| 出力 | 型 | 意味 |
+| --- | --- | --- |
+| `source` | STRING | 入力した元テキスト |
+| `translated` | STRING | 翻訳結果 |
+
+`Exclude and restore` の例（英→日）:
+
+```
+A cinematic photo of a woman in a red dress <d>standing on a rainy street at night, neon lights</d> looking at the camera.
+↓
+赤いドレスを着た女性の映画写真 <d>standing on a rainy street at night, neon lights</d> カメラを見てる。
+```
+
+ブロックの外側は区間ごとに個別に翻訳されるため、ブロックをまたぐ文脈は失われます。1 文の途中にブロックがある場合は `Translate as text` の方が自然な訳になることがあります。
+
+エラー（ダウンロード失敗・VRAM 不足など）は出力に書き込まず、ノードのエラーとしてワークフローを停止します（原因と対処をメッセージに含めます）。
+
+---
+
 # Node Value Template
 
 - カテゴリ: `PromptPalette-F`
@@ -451,6 +504,8 @@ Smarty のように、トークンの値へ修飾子を適用できます。`|` 
 [【ComfyUI】細々としたノードを作る - ふぁメモ](https://fa.hatenadiary.jp/entry/20260604/1780560190)
 
 # 実験ノード用モデル
+
+`pfnet/plamo-3-translate-0.8b`（PlamoTranslate-F が `ComfyUI/models/LLM/plamo-3-translate-0.8b/` へ自動ダウンロード） [huggingface pfnet/plamo-3-translate-0.8b](https://huggingface.co/pfnet/plamo-3-translate-0.8b)
 
 `gemma4_e4b_it_fp8_scaled.safetensors` [huggingface Comfy-Org/gemma-4](https://huggingface.co/Comfy-Org/gemma-4/resolve/main/text_encoders/gemma4_e4b_it_fp8_scaled.safetensors)
 
@@ -778,6 +833,59 @@ Outputs:
 | `negative` | STRING | The negative prompt (may be empty for FLUX or when not needed) |
 
 > ✅ **Confirmed working model**: `gemma4_e4b_it_fp8_scaled.safetensors`
+
+---
+
+## PlamoTranslate-F Node
+
+- Category: `PromptPalette-F`
+- Display name: `PlamoTranslate-F`
+- Class: `PlamoTranslate_F`
+
+A translation node that runs Preferred Networks' translation-only model **[pfnet/plamo-3-translate-0.8b](https://huggingface.co/pfnet/plamo-3-translate-0.8b)** locally through `transformers`. Unlike `Gemma Translate` it needs **no `CLIPLoader`**: the model is **downloaded automatically on first use** (about 1.8 GB, into `ComfyUI/models/LLM/plamo-3-translate-0.8b/`). The source language is detected by the model (53 languages); the target is Japanese / English / Chinese (Simplified or Traditional).
+
+> 📌 **How it runs:** like `Gemma Translate`, translation runs **when you Queue Prompt**, and the result appears in the node's translated field. Once loaded, the model stays in memory until ComfyUI exits (turn on `unload_after` to free it after every run). It uses about 1.8 GB of VRAM in bf16 and one translation takes roughly 0.3–1.5 s.
+
+> ⚠️ **License:** the model is released under the [PLaMo Community License](https://huggingface.co/pfnet/plamo-3-translate-0.8b). Personal / non-commercial use is free; commercial use has conditions (registration or a separate agreement depending on revenue). Check the license before use.
+
+> 🔧 **Nothing extra to install:** `transformers` and `huggingface_hub` are ComfyUI core dependencies. The model's bundled tokenizer asks for `numba`, but when `numba` is missing or broken the node runs it in pure Python automatically (fast enough for prompt-sized text).
+
+| Action | How |
+| --- | --- |
+| Translate | Pick a `target_language` and **Queue Prompt** (the result fills the translated field after execution) |
+| Swap | The `⇅ 入れ替え` button swaps the source and translated text |
+
+Inputs:
+
+| Input | Type | Description |
+| --- | --- | --- |
+| `text` | STRING | The source text (language auto-detected) |
+| `target_language` | choice | Target language (`Japanese` / `English` / `Chinese (Simplified)` / `Chinese (Traditional)`) |
+| `d_tag_mode` | choice | How to treat `<d>…</d>` blocks (used in Minimax H3 style prompts). `Exclude and restore` (default): translate only the text outside the blocks and put each block back untouched at its original position. `Remove`: drop the blocks, then translate. `Translate as text`: send everything, tags included, to the model |
+| `japanese_form` | choice | Politeness of Japanese output (`Default` / `Polite (です・ます)` / `Plain (だ・である)`). Only applies when the target is Japanese |
+| `max_new_tokens` | INT | Maximum number of tokens to generate (default: 512) |
+| `use_cache` | BOOLEAN | When ON (default), the same text with the same settings is answered from an in-memory cache (cleared when ComfyUI restarts) |
+| `unload_after` | BOOLEAN | When ON, the model is unloaded from VRAM after translating and reloaded on the next run (about 2 s). Default OFF |
+| `device` | choice | `auto`: ComfyUI's GPU (bf16). `cpu`: run on the CPU (fp32; slower, uses no VRAM) |
+
+Outputs:
+
+| Output | Type | Meaning |
+| --- | --- | --- |
+| `source` | STRING | The source text you entered |
+| `translated` | STRING | The translation |
+
+`Exclude and restore` example (EN → JA):
+
+```
+A cinematic photo of a woman in a red dress <d>standing on a rainy street at night, neon lights</d> looking at the camera.
+↓
+赤いドレスを着た女性の映画写真 <d>standing on a rainy street at night, neon lights</d> カメラを見てる。
+```
+
+The text outside the blocks is translated segment by segment, so context does not carry across a block. When a block sits in the middle of a sentence, `Translate as text` may give a more natural result.
+
+Errors (download failure, out of VRAM, …) are not written into the output; they stop the workflow as a node error whose message names the likely cause and fix.
 
 ---
 

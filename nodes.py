@@ -2060,6 +2060,657 @@ class GemmaImagePrompt(BaseNodeClass):
 
 
 # ---------------------------------------------------------------------------
+# PlamoTranslate-F — local translation with pfnet/plamo-3-translate-0.8b.
+#
+# The model is a translation-only LLM that runs through plain `transformers`
+# (no CLIPLoader). It is downloaded automatically into
+# ComfyUI/models/LLM/plamo-3-translate-0.8b on first use (pinned revision), kept
+# loaded between runs, and translated with greedy decoding via the repo's own
+# chat template (PFML3 prompt format).
+#
+# The checkpoint ships its own Python code (modeling_plamo.py /
+# tokenization_plamo.py). We load those two files ourselves with importlib
+# instead of AutoModel(trust_remote_code=True) for two reasons:
+#   * the tokenizer does `from numba import njit` unconditionally, and
+#     transformers' remote-code loader refuses the file when numba is missing
+#     or fails to import (numba is pinned to a NumPy range and breaks easily).
+#     We substitute a no-op `njit` + plain dict when numba is unusable — the
+#     tokenizer is then pure Python, which is still fast enough for prompts
+#     (hundreds of tokens in a few milliseconds).
+#   * the revision is pinned (_PLAMO_REVISION), so the code we execute is a
+#     known file, not whatever the hub serves today.
+# ---------------------------------------------------------------------------
+
+_PLAMO_REPO_ID = "pfnet/plamo-3-translate-0.8b"
+# Pinned commit of the Hugging Face repo. Bump deliberately: it changes the
+# weights AND the Python code that gets executed.
+_PLAMO_REVISION = "8b4d42855622093e610ba9b90c2d2b59f8d5c15d"
+_PLAMO_DIR_NAME = "plamo-3-translate-0.8b"
+# Files the node needs. Everything else in the repo (figures, READMEs) is
+# skipped; "figures/*" alone is several MB of images.
+_PLAMO_REQUIRED_FILES = (
+    "config.json",
+    "generation_config.json",
+    "model.safetensors",
+    "modeling_plamo.py",
+    "tokenization_plamo.py",
+    "tokenizer.jsonl",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+    "chat_template.jinja",
+)
+_PLAMO_DOWNLOAD_PATTERNS = list(_PLAMO_REQUIRED_FILES) + ["LICENSE*"]
+
+# UI language label -> PFML3 language code (the chat template's target_lang).
+_PLAMO_TARGET_LANGS = {
+    "Japanese": "ja",
+    "English": "en",
+    "Chinese (Simplified)": "zh-hans",
+    "Chinese (Traditional)": "zh-hant",
+}
+_PLAMO_TARGET_OPTIONS = list(_PLAMO_TARGET_LANGS.keys())
+
+_PLAMO_D_TAG_OPTIONS = ["Exclude and restore", "Remove", "Translate as text"]
+_PLAMO_FORM_OPTIONS = ["Default", "Polite (です・ます)", "Plain (だ・である)"]
+_PLAMO_DEVICE_OPTIONS = ["auto", "cpu"]
+
+# <d> ... </d> blocks (Minimax H3 style "detail" spans). DOTALL so a block may
+# span lines; non-greedy so neighbouring blocks stay separate.
+_PLAMO_D_TAG_RE = re.compile(r"<d>.*?</d>", re.IGNORECASE | re.DOTALL)
+# Reserved PFML tokens must not appear in the prompt (the chat template raises).
+_PLAMO_RESERVED_RE = re.compile(r"<\|plamo:")
+# Approximate VRAM the bf16 model + activations need; passed to ComfyUI's
+# free_memory so it evicts its own models first instead of letting us OOM.
+_PLAMO_VRAM_BYTES = 2_500_000_000
+
+_PLAMO_INSTALL_HINT = (
+    "`transformers` と `huggingface_hub` が ComfyUI の Python 環境に必要です"
+    "（ComfyUI 本体の依存関係に含まれているはずです）。"
+    "\nEN: `transformers` and `huggingface_hub` must be installed in ComfyUI's "
+    "Python environment (both are ComfyUI core dependencies)."
+)
+
+
+class _PlamoLRU:
+    """Tiny in-memory LRU: (settings + source text) -> translation. Lives only
+    for the ComfyUI process; nothing is written to disk."""
+
+    def __init__(self, capacity=64):
+        from collections import OrderedDict
+        self.capacity = int(capacity)
+        self._data = OrderedDict()
+
+    @staticmethod
+    def key(*parts):
+        return json.dumps(parts, ensure_ascii=False, sort_keys=True)
+
+    def get(self, key):
+        if key not in self._data:
+            return None
+        self._data.move_to_end(key)
+        return self._data[key]
+
+    def put(self, key, value):
+        self._data[key] = value
+        self._data.move_to_end(key)
+        while len(self._data) > self.capacity:
+            self._data.popitem(last=False)
+
+    def clear(self):
+        self._data.clear()
+
+    def __len__(self):
+        return len(self._data)
+
+
+def _plamo_models_dir():
+    """ComfyUI/models/LLM (via folder_paths), else a models/ dir next to this
+    file (standalone / tests)."""
+    try:
+        import folder_paths
+        base = folder_paths.models_dir
+    except Exception:
+        base = os.path.join(os.path.dirname(os.path.realpath(__file__)), "models")
+    return os.path.join(base, "LLM")
+
+
+def _plamo_model_dir():
+    return os.path.join(_plamo_models_dir(), _PLAMO_DIR_NAME)
+
+
+def _plamo_is_complete(model_dir):
+    return all(
+        os.path.isfile(os.path.join(model_dir, f)) for f in _PLAMO_REQUIRED_FILES
+    )
+
+
+def _plamo_ensure_model(model_dir=None):
+    """Return the local model directory, downloading it on first use.
+
+    A directory that already holds every required file is used as-is without
+    touching the network (so the node keeps working offline and with a
+    manually placed copy)."""
+    model_dir = model_dir or _plamo_model_dir()
+    if _plamo_is_complete(model_dir):
+        return model_dir
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError as e:
+        raise RuntimeError(
+            "[PlamoTranslate-F] huggingface_hub を読み込めません / cannot import "
+            f"huggingface_hub: {e}\n{_PLAMO_INSTALL_HINT}"
+        ) from e
+    os.makedirs(model_dir, exist_ok=True)
+    print(
+        f"[PlamoTranslate-F] Downloading {_PLAMO_REPO_ID}@{_PLAMO_REVISION[:7]} "
+        f"(about 1.8 GB) to {model_dir} ..."
+    )
+    try:
+        snapshot_download(
+            repo_id=_PLAMO_REPO_ID,
+            revision=_PLAMO_REVISION,
+            local_dir=model_dir,
+            allow_patterns=_PLAMO_DOWNLOAD_PATTERNS,
+        )
+    except Exception as e:
+        raise RuntimeError(
+            "[PlamoTranslate-F] モデルのダウンロードに失敗しました。ネットワーク接続と"
+            f"空き容量（約 2 GB）を確認してください。保存先: {model_dir}\n"
+            "EN: model download failed. Check the network connection and free "
+            f"disk space (about 2 GB). Target: {model_dir}\n"
+            f"元のエラー / original error: {type(e).__name__}: {e}"
+        ) from e
+    if not _plamo_is_complete(model_dir):
+        missing = [f for f in _PLAMO_REQUIRED_FILES
+                   if not os.path.isfile(os.path.join(model_dir, f))]
+        raise RuntimeError(
+            f"[PlamoTranslate-F] ダウンロード後もファイルが不足しています / files still "
+            f"missing after download: {missing} (in {model_dir})"
+        )
+    print("[PlamoTranslate-F] Download complete.")
+    return model_dir
+
+
+def _plamo_numba_usable():
+    try:
+        import numba  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def _plamo_numba_stub_modules():
+    """Fake `numba` package: `njit` returns the function unchanged and
+    `numba.typed.Dict.empty()` is a plain dict, so the tokenizer's Viterbi
+    encoder simply runs as ordinary Python."""
+    import types as _types
+
+    def njit(func=None, **_kwargs):
+        if callable(func):
+            return func
+        return lambda f: f
+
+    numba = _types.ModuleType("numba")
+    numba.njit = njit
+    core = _types.ModuleType("numba.core")
+    ctypes_ = _types.ModuleType("numba.core.types")
+    ctypes_.int64 = "int64"
+    ctypes_.int32 = "int32"
+    core.types = ctypes_
+    typed = _types.ModuleType("numba.typed")
+
+    class Dict(dict):
+        @staticmethod
+        def empty(key_type=None, value_type=None):
+            return Dict()
+
+    typed.Dict = Dict
+    numba.core = core
+    numba.typed = typed
+    return {
+        "numba": numba,
+        "numba.core": core,
+        "numba.core.types": ctypes_,
+        "numba.typed": typed,
+    }
+
+
+def _plamo_import_file(module_name, path, numba_stub=False):
+    """Import a .py file from the model directory as `module_name`. With
+    numba_stub=True the fake numba package is visible ONLY while the file's
+    top-level code runs; sys.modules is restored afterwards so other packages
+    that import numba later see the real state."""
+    import importlib.util
+    import sys
+
+    stubs = _plamo_numba_stub_modules() if numba_stub else {}
+    saved = {name: sys.modules.get(name) for name in stubs}
+    sys.modules.update(stubs)
+    try:
+        spec = importlib.util.spec_from_file_location(module_name, path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    finally:
+        for name, previous in saved.items():
+            if previous is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = previous
+    return module
+
+
+class _PlamoRuntime:
+    """The loaded tokenizer + model, shared by every PlamoTranslate-F node in
+    the process. Created lazily by _plamo_get_runtime()."""
+
+    def __init__(self, model_dir, device_choice="auto"):
+        import torch
+
+        self.model_dir = model_dir
+        self.device = self._pick_device(device_choice)
+        # bf16 on GPU (the checkpoint's native dtype); fp32 on CPU, where bf16
+        # matmuls are slow or unsupported.
+        self.dtype = torch.float32 if self.device.type == "cpu" else torch.bfloat16
+
+        use_stub = not _plamo_numba_usable()
+        if use_stub:
+            print("[PlamoTranslate-F] numba unavailable - tokenizer runs in pure Python.")
+        tok_mod = _plamo_import_file(
+            "ppf_plamo_tokenization",
+            os.path.join(model_dir, "tokenization_plamo.py"),
+            numba_stub=use_stub,
+        )
+        model_mod = _plamo_import_file(
+            "ppf_plamo_modeling", os.path.join(model_dir, "modeling_plamo.py")
+        )
+
+        self.tokenizer = tok_mod.Plamo3Tokenizer.from_pretrained(model_dir)
+        config = model_mod.Plamo3Config.from_pretrained(model_dir)
+        try:
+            model = model_mod.Plamo3ForCausalLM.from_pretrained(
+                model_dir, config=config, dtype=self.dtype
+            )
+        except TypeError:
+            # transformers < 4.56 spells the argument torch_dtype.
+            model = model_mod.Plamo3ForCausalLM.from_pretrained(
+                model_dir, config=config, torch_dtype=self.dtype
+            )
+        self.model = model.to(device=self.device, dtype=self.dtype).eval()
+
+        # Stop on <|plamo:bos|> (1) or <|plamo:tag|> (16) — the model emits one
+        # of them right after the translation. generation_config.json already
+        # lists both; stating them here keeps behaviour fixed across
+        # transformers versions.
+        eos = [self.tokenizer.convert_tokens_to_ids("<|plamo:bos|>")]
+        tag_id = self.tokenizer.convert_tokens_to_ids("<|plamo:tag|>")
+        if isinstance(tag_id, int) and tag_id >= 0:
+            eos.append(tag_id)
+        self.eos_token_ids = eos
+        pad = self.tokenizer.pad_token_id
+        self.pad_token_id = pad if isinstance(pad, int) else eos[0]
+
+    @staticmethod
+    def _pick_device(choice):
+        import torch
+
+        if str(choice).lower() == "cpu":
+            return torch.device("cpu")
+        try:
+            import comfy.model_management as mm
+            return mm.get_torch_device()
+        except Exception:
+            return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    def translate(self, text, target_lang, form=None, max_new_tokens=512):
+        """Translate ONE text (already non-blank). Returns the decoded string."""
+        import torch
+
+        kwargs = {"target_lang": target_lang}
+        if form:
+            kwargs["form"] = form
+        enc = self.tokenizer.apply_chat_template(
+            [{"role": "user", "content": text}],
+            add_generation_prompt=True,
+            return_dict=True,
+            return_tensors="pt",
+            **kwargs,
+        )
+        enc = {k: v.to(self.device) for k, v in enc.items()}
+        with torch.no_grad():
+            out = self.model.generate(
+                **enc,
+                do_sample=False,
+                max_new_tokens=int(max_new_tokens),
+                eos_token_id=self.eos_token_ids,
+                pad_token_id=self.pad_token_id,
+            )
+        generated = out[0, enc["input_ids"].shape[1]:]
+        return self.tokenizer.decode(generated, skip_special_tokens=True)
+
+    def unload(self):
+        self.model = None
+        self.tokenizer = None
+
+
+_PLAMO_RUNTIME = None
+_PLAMO_LOCK = None
+_PLAMO_CACHE = _PlamoLRU(64)
+
+
+def _plamo_lock():
+    global _PLAMO_LOCK
+    if _PLAMO_LOCK is None:
+        import threading
+        _PLAMO_LOCK = threading.Lock()
+    return _PLAMO_LOCK
+
+
+def _plamo_get_runtime(device_choice="auto"):
+    """Return the shared runtime, loading the model on first use (or after an
+    unload / device change). Asks ComfyUI to free VRAM for it first."""
+    global _PLAMO_RUNTIME
+    rt = _PLAMO_RUNTIME
+    if rt is not None and rt.model is not None:
+        wants_cpu = str(device_choice).lower() == "cpu"
+        if wants_cpu == (rt.device.type == "cpu"):
+            return rt
+        _plamo_unload_runtime()
+    try:
+        import transformers  # noqa: F401
+        import torch  # noqa: F401
+    except ImportError as e:
+        raise RuntimeError(
+            f"[PlamoTranslate-F] 必要なライブラリがありません / missing library: {e}\n"
+            f"{_PLAMO_INSTALL_HINT}"
+        ) from e
+    model_dir = _plamo_ensure_model()
+    if str(device_choice).lower() != "cpu":
+        try:
+            import comfy.model_management as mm
+            mm.free_memory(_PLAMO_VRAM_BYTES, mm.get_torch_device())
+        except Exception:
+            pass
+    print(f"[PlamoTranslate-F] Loading model from {model_dir} ...")
+    try:
+        rt = _PlamoRuntime(model_dir, device_choice)
+    except Exception as e:
+        hint = ""
+        msg = str(e).lower()
+        if "out of memory" in msg or type(e).__name__ == "OutOfMemoryError":
+            hint = (
+                "\n原因の可能性 / likely cause: VRAM 不足です。`device` を `cpu` にするか、"
+                "他のモデルをアンロードしてください / out of VRAM - set `device` to "
+                "`cpu` or unload other models."
+            )
+        raise RuntimeError(
+            "[PlamoTranslate-F] モデルの読み込みに失敗しました / failed to load the "
+            f"model ({model_dir}).{hint}\n元のエラー / original error: "
+            f"{type(e).__name__}: {e}"
+        ) from e
+    _PLAMO_RUNTIME = rt
+    print(f"[PlamoTranslate-F] Model ready on {rt.device} ({rt.dtype}).")
+    return rt
+
+
+def _plamo_unload_runtime():
+    """Drop the model and return its VRAM. The LRU cache is kept."""
+    global _PLAMO_RUNTIME
+    rt = _PLAMO_RUNTIME
+    _PLAMO_RUNTIME = None
+    if rt is not None:
+        try:
+            rt.unload()
+        except Exception:
+            pass
+    import gc
+    gc.collect()
+    try:
+        import comfy.model_management as mm
+        mm.soft_empty_cache()
+    except Exception:
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+
+class PlamoTranslate_F(BaseNodeClass):
+    """Translate text locally with pfnet/plamo-3-translate-0.8b (transformers).
+
+    No CLIPLoader is needed: the model is downloaded automatically on first use
+    (into ComfyUI/models/LLM/plamo-3-translate-0.8b, pinned revision) and kept
+    loaded between runs. Translation happens during graph execution, like
+    Gemma Translate; the result is returned on ``translated`` and pushed to the
+    node's display field via the ``ui`` payload.
+
+    Options: target language (Japanese / English / Chinese simplified or
+    traditional — the source language is auto-detected by the model), how to
+    treat ``<d>...</d>`` blocks (translate the text around them and put the
+    blocks back verbatim / drop them / translate everything), the Japanese
+    politeness form, an in-memory result cache, and ``unload_after``.
+    """
+
+    if V3_AVAILABLE:
+        @classmethod
+        def define_schema(cls):
+            return io.Schema(
+                node_id="PlamoTranslate_F",
+                display_name="PlamoTranslate-F",
+                category="Prompt Palette-F",
+                inputs=[
+                    io.String.Input("text", multiline=True, default=""),
+                    io.Combo.Input(
+                        "target_language",
+                        options=_PLAMO_TARGET_OPTIONS,
+                        default="English",
+                    ),
+                    io.Combo.Input(
+                        "d_tag_mode",
+                        options=_PLAMO_D_TAG_OPTIONS,
+                        default=_PLAMO_D_TAG_OPTIONS[0],
+                        optional=True,
+                    ),
+                    io.Combo.Input(
+                        "japanese_form",
+                        options=_PLAMO_FORM_OPTIONS,
+                        default=_PLAMO_FORM_OPTIONS[0],
+                        optional=True,
+                    ),
+                    io.Int.Input("max_new_tokens", default=512, min=1, max=4096, optional=True),
+                    io.Boolean.Input("use_cache", default=True, optional=True),
+                    io.Boolean.Input("unload_after", default=False, optional=True),
+                    io.Combo.Input(
+                        "device",
+                        options=_PLAMO_DEVICE_OPTIONS,
+                        default="auto",
+                        optional=True,
+                    ),
+                ],
+                outputs=[
+                    io.String.Output(display_name="source"),
+                    io.String.Output(display_name="translated"),
+                ],
+            )
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text": ("STRING", {
+                    "default": "",
+                    "multiline": True,
+                    "tooltip": "Source text to translate. The source language is detected automatically.",
+                }),
+                # Combos are declared as ("COMBO", {"options": [...]}) — see the
+                # note in GemmaTranslate.INPUT_TYPES.
+                "target_language": ("COMBO", {
+                    "options": _PLAMO_TARGET_OPTIONS,
+                    "default": "English",
+                    "tooltip": "Language to translate into.",
+                }),
+            },
+            "optional": {
+                "d_tag_mode": ("COMBO", {
+                    "options": _PLAMO_D_TAG_OPTIONS,
+                    "default": _PLAMO_D_TAG_OPTIONS[0],
+                    "tooltip": (
+                        "How to treat <d>...</d> blocks (Minimax H3 style). "
+                        "Exclude and restore: translate the text around them and put the blocks back untouched. "
+                        "Remove: drop the blocks, translate the rest. "
+                        "Translate as text: send everything to the model."
+                    ),
+                }),
+                "japanese_form": ("COMBO", {
+                    "options": _PLAMO_FORM_OPTIONS,
+                    "default": _PLAMO_FORM_OPTIONS[0],
+                    "tooltip": "Politeness of Japanese output (only used when the target is Japanese).",
+                }),
+                "max_new_tokens": ("INT", {
+                    "default": 512,
+                    "min": 1,
+                    "max": 4096,
+                    "tooltip": "Maximum number of tokens to generate per translated segment.",
+                }),
+                "use_cache": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Reuse the previous result when the same text was already translated with the same settings (in-memory, cleared on restart).",
+                }),
+                "unload_after": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Unload the translation model from VRAM after translating. It is reloaded on the next run (about 2 seconds).",
+                }),
+                "device": ("COMBO", {
+                    "options": _PLAMO_DEVICE_OPTIONS,
+                    "default": "auto",
+                    "tooltip": "auto: ComfyUI's GPU (bf16, about 1.8 GB VRAM). cpu: run on the CPU in fp32 (slower, no VRAM).",
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("source", "translated")
+    FUNCTION = "execute"
+    CATEGORY = "Prompt Palette-F"
+
+    @staticmethod
+    def _target_code(target_language):
+        return _PLAMO_TARGET_LANGS.get(target_language, "en")
+
+    @staticmethod
+    def _form_code(japanese_form, target_code):
+        """The chat template accepts form only together with target_lang='ja'."""
+        if target_code != "ja" or not isinstance(japanese_form, str):
+            return None
+        lowered = japanese_form.lower()
+        if lowered.startswith("polite"):
+            return "polite"
+        if lowered.startswith("plain"):
+            return "plain"
+        return None
+
+    @staticmethod
+    def _sanitize(text):
+        """Neutralize reserved PFML tokens — the chat template refuses them."""
+        return _PLAMO_RESERVED_RE.sub("<|plamo-", text)
+
+    @classmethod
+    def _translate_segment(cls, runtime, segment, target_code, form, max_new_tokens):
+        """Translate one chunk of plain text, keeping its leading / trailing
+        whitespace (newlines between <d> blocks and text must survive). Blank
+        chunks pass through — the model is never called on them."""
+        core = segment.strip()
+        if not core:
+            return segment
+        lead = segment[: len(segment) - len(segment.lstrip())]
+        trail = segment[len(segment.rstrip()):]
+        out = runtime.translate(cls._sanitize(core), target_code, form, max_new_tokens)
+        return lead + (out if isinstance(out, str) else str(out)).strip() + trail
+
+    @classmethod
+    def _translate_text(cls, runtime, text, target_code, form, max_new_tokens, d_tag_mode):
+        mode = (d_tag_mode or "").lower()
+        if mode.startswith("remove"):
+            return cls._translate_segment(
+                runtime, _PLAMO_D_TAG_RE.sub("", text), target_code, form, max_new_tokens
+            )
+        if mode.startswith("exclude"):
+            # Translate the pieces between <d> blocks one by one; each block is
+            # put back exactly where it was. Translating the outside as one
+            # string with placeholders is NOT used: the model reorders them when
+            # the target language's word order differs.
+            pieces = []
+            last = 0
+            for m in _PLAMO_D_TAG_RE.finditer(text):
+                pieces.append(cls._translate_segment(
+                    runtime, text[last:m.start()], target_code, form, max_new_tokens
+                ))
+                pieces.append(m.group(0))
+                last = m.end()
+            pieces.append(cls._translate_segment(
+                runtime, text[last:], target_code, form, max_new_tokens
+            ))
+            return "".join(pieces)
+        return cls._translate_segment(runtime, text, target_code, form, max_new_tokens)
+
+    @classmethod
+    def _output(cls, source, translated):
+        ui = {"translated": [translated]}
+        if V3_AVAILABLE:
+            return io.NodeOutput(source, translated, ui=ui)
+        return {"ui": ui, "result": (source, translated)}
+
+    @classmethod
+    def execute(cls, text="", target_language="English",
+                d_tag_mode=_PLAMO_D_TAG_OPTIONS[0], japanese_form=_PLAMO_FORM_OPTIONS[0],
+                max_new_tokens=512, use_cache=True, unload_after=False, device="auto"):
+        source = text if isinstance(text, str) else ""
+        if not source.strip():
+            return cls._output(source, "")
+
+        target_code = cls._target_code(target_language)
+        form = cls._form_code(japanese_form, target_code)
+        key = _PlamoLRU.key(
+            _PLAMO_REVISION, source, target_code, form or "", (d_tag_mode or "").lower(),
+            int(max_new_tokens),
+        )
+        if use_cache:
+            cached = _PLAMO_CACHE.get(key)
+            if cached is not None:
+                return cls._output(source, cached)
+
+        with _plamo_lock():
+            runtime = _plamo_get_runtime(device)
+            try:
+                translated = cls._translate_text(
+                    runtime, source, target_code, form, max_new_tokens, d_tag_mode
+                )
+            except Exception as e:
+                if unload_after:
+                    _plamo_unload_runtime()
+                if isinstance(e, RuntimeError) and str(e).startswith("[PlamoTranslate-F]"):
+                    raise
+                hint = ""
+                msg = str(e).lower()
+                if "out of memory" in msg or type(e).__name__ == "OutOfMemoryError":
+                    hint = (
+                        "\n原因の可能性 / likely cause: VRAM 不足です。`device` を `cpu` にするか、"
+                        "テキストを短くしてください / out of VRAM - set `device` to `cpu` "
+                        "or shorten the text."
+                    )
+                raise RuntimeError(
+                    f"[PlamoTranslate-F] 翻訳に失敗しました / translation failed.{hint}\n"
+                    f"元のエラー / original error: {type(e).__name__}: {e}"
+                ) from e
+            if unload_after:
+                _plamo_unload_runtime()
+
+        _PLAMO_CACHE.put(key, translated)
+        return cls._output(source, translated)
+
+
+# ---------------------------------------------------------------------------
 # Translation backend for the "Prompt Tabs + Translate" node.
 #
 # Exposes POST /promptpalette_f/translate so the frontend can translate on
@@ -2201,7 +2852,7 @@ if V3_AVAILABLE:
             return os.path.join(os.path.dirname(os.path.realpath(__file__)), "web")
 
         async def get_node_list(self):
-            return [PromptPalette_F, SimpleMultiConcatText, GetFirstWord, GetFirstWordList, PromptTabs, PromptTabsTranslate, NodeValueTemplate, GemmaTranslate, GemmaImagePrompt]
+            return [PromptPalette_F, SimpleMultiConcatText, GetFirstWord, GetFirstWordList, PromptTabs, PromptTabsTranslate, NodeValueTemplate, GemmaTranslate, GemmaImagePrompt, PlamoTranslate_F]
 
     async def comfy_entrypoint():
         return PromptPaletteExtension()
@@ -2218,6 +2869,7 @@ NODE_CLASS_MAPPINGS = {
     "NodeValueTemplate": NodeValueTemplate,
     "GemmaTranslate": GemmaTranslate,
     "GemmaImagePrompt": GemmaImagePrompt,
+    "PlamoTranslate_F": PlamoTranslate_F,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "PromptPalette_F": "PromptPalette-F",
@@ -2229,5 +2881,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "NodeValueTemplate": "Node Value Template",
     "GemmaTranslate": "Gemma Translate",
     "GemmaImagePrompt": "Gemma Image Prompt",
+    "PlamoTranslate_F": "PlamoTranslate-F",
 }
 WEB_DIRECTORY = os.path.join(os.path.dirname(os.path.realpath(__file__)), "web")

@@ -5,3 +5,8 @@
 # the node simply returns an empty translation.
 
 googletrans
+
+# PlamoTranslate-F needs transformers + huggingface_hub (both ComfyUI core
+# dependencies) and downloads pfnet/plamo-3-translate-0.8b on first use.
+# numba is OPTIONAL: the model's tokenizer uses it when importable and
+# falls back to pure Python otherwise, so it is deliberately not listed.

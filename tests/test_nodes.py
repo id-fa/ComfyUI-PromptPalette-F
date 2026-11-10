@@ -30,6 +30,7 @@ from nodes import (  # noqa: E402
     NodeValueTemplate,
     GemmaTranslate,
     GemmaImagePrompt,
+    PlamoTranslate_F,
 )
 
 
@@ -45,6 +46,7 @@ class TestStandaloneImport(unittest.TestCase):
                 "PromptPalette_F", "SimpleMultiConcatText", "GetFirstWord",
                 "GetFirstWordList", "PromptTabs", "PromptTabsTranslate",
                 "NodeValueTemplate", "GemmaTranslate", "GemmaImagePrompt",
+                "PlamoTranslate_F",
             },
         )
 
@@ -954,6 +956,247 @@ class TestNodeValueTemplate(unittest.TestCase):
         with self.assertRaises(RuntimeError) as cm:
             NodeValueTemplate.execute(template=payload)
         self.assertIn("%Gone.seed%, %KSampler.nope%", str(cm.exception))
+
+
+class _FakePlamoRuntime:
+    """Stand-in for nodes._PlamoRuntime: records every translate() call and
+    returns "[lang]" + text so segment order / whitespace can be asserted."""
+
+    def __init__(self, fn=None):
+        self.calls = []
+        self.fn = fn or (lambda text, lang: f"[{lang}]{text}")
+        self.model = object()
+
+    def translate(self, text, target_lang, form=None, max_new_tokens=512):
+        self.calls.append((text, target_lang, form, int(max_new_tokens)))
+        return self.fn(text, target_lang)
+
+    def unload(self):
+        self.model = None
+
+
+class TestPlamoTranslateF(unittest.TestCase):
+    """Backend logic only — the model is replaced by _FakePlamoRuntime, so no
+    download / torch / transformers is needed."""
+
+    def setUp(self):
+        self.rt = _FakePlamoRuntime()
+        self.unloads = []
+        self._orig_get = nodes._plamo_get_runtime
+        self._orig_unload = nodes._plamo_unload_runtime
+        nodes._plamo_get_runtime = lambda device="auto": self.rt
+        nodes._plamo_unload_runtime = lambda: self.unloads.append(True)
+        nodes._PLAMO_CACHE.clear()
+
+    def tearDown(self):
+        nodes._plamo_get_runtime = self._orig_get
+        nodes._plamo_unload_runtime = self._orig_unload
+        nodes._PLAMO_CACHE.clear()
+
+    def run_node(self, text, **kw):
+        out = PlamoTranslate_F.execute(text=text, **kw)
+        return out["result"]
+
+    def test_empty_source_returns_empty_without_loading(self):
+        loaded = []
+        nodes._plamo_get_runtime = lambda device="auto": loaded.append(1) or self.rt
+        self.assertEqual(self.run_node("   \n"), ("   \n", ""))
+        self.assertEqual(loaded, [])
+        self.assertEqual(self.rt.calls, [])
+
+    def test_ui_payload_mirrors_translation(self):
+        out = PlamoTranslate_F.execute(text="hello", target_language="Japanese")
+        self.assertEqual(out["result"], ("hello", "[ja]hello"))
+        self.assertEqual(out["ui"], {"translated": ["[ja]hello"]})
+
+    def test_target_language_codes(self):
+        for label, code in (
+            ("Japanese", "ja"),
+            ("English", "en"),
+            ("Chinese (Simplified)", "zh-hans"),
+            ("Chinese (Traditional)", "zh-hant"),
+        ):
+            self.rt.calls.clear()
+            nodes._PLAMO_CACHE.clear()
+            self.run_node("x", target_language=label)
+            self.assertEqual(self.rt.calls[0][1], code, label)
+
+    def test_japanese_form_only_for_japanese_target(self):
+        self.run_node("x", target_language="Japanese", japanese_form="Polite (です・ます)")
+        self.assertEqual(self.rt.calls[-1][2], "polite")
+        self.run_node("y", target_language="Japanese", japanese_form="Plain (だ・である)")
+        self.assertEqual(self.rt.calls[-1][2], "plain")
+        self.run_node("z", target_language="Japanese", japanese_form="Default")
+        self.assertIsNone(self.rt.calls[-1][2])
+        # The chat template rejects `form` unless target_lang is ja.
+        self.run_node("w", target_language="English", japanese_form="Polite (です・ます)")
+        self.assertIsNone(self.rt.calls[-1][2])
+
+    def test_max_new_tokens_forwarded(self):
+        self.run_node("x", max_new_tokens=77)
+        self.assertEqual(self.rt.calls[0][3], 77)
+
+    def test_d_tags_excluded_and_restored_in_place(self):
+        text = "A woman <d>standing, neon</d> looks at you.\n<d>shallow dof</d>\nThe end"
+        _, translated = self.run_node(text, target_language="Japanese",
+                                      d_tag_mode="Exclude and restore")
+        # Only the text OUTSIDE the blocks reaches the model...
+        self.assertEqual([c[0] for c in self.rt.calls],
+                         ["A woman", "looks at you.", "The end"])
+        # ...and the blocks come back verbatim, in place, with the surrounding
+        # whitespace / newlines intact.
+        self.assertEqual(
+            translated,
+            "[ja]A woman <d>standing, neon</d> [ja]looks at you.\n<d>shallow dof</d>\n[ja]The end",
+        )
+
+    def test_d_tags_blank_gaps_do_not_call_the_model(self):
+        text = "<d>a</d>\n\n<d>b</d>"
+        _, translated = self.run_node(text, d_tag_mode="Exclude and restore")
+        self.assertEqual(self.rt.calls, [])
+        self.assertEqual(translated, text)
+
+    def test_d_tags_case_insensitive_and_multiline(self):
+        text = "x <D>line1\nline2</D> y"
+        _, translated = self.run_node(text, d_tag_mode="Exclude and restore")
+        self.assertEqual([c[0] for c in self.rt.calls], ["x", "y"])
+        self.assertEqual(translated, "[en]x <D>line1\nline2</D> [en]y")
+
+    def test_d_tags_removed(self):
+        # The blocks are dropped; the whitespace around them is left alone.
+        _, translated = self.run_node("A <d>x</d> B <d>y</d>", d_tag_mode="Remove")
+        self.assertEqual([c[0] for c in self.rt.calls], ["A  B"])
+        self.assertEqual(translated, "[en]A  B ")
+
+    def test_d_tags_translated_as_text(self):
+        text = "A <d>x</d> B"
+        _, translated = self.run_node(text, d_tag_mode="Translate as text")
+        self.assertEqual([c[0] for c in self.rt.calls], [text])
+        self.assertEqual(translated, "[en]" + text)
+
+    def test_unclosed_d_tag_is_plain_text(self):
+        text = "A <d>x B"
+        self.run_node(text, d_tag_mode="Exclude and restore")
+        self.assertEqual([c[0] for c in self.rt.calls], [text])
+
+    def test_leading_and_trailing_whitespace_preserved(self):
+        _, translated = self.run_node("\n  hello world \n\n")
+        self.assertEqual(self.rt.calls[0][0], "hello world")
+        self.assertEqual(translated, "\n  [en]hello world \n\n")
+
+    def test_reserved_pfml_tokens_are_neutralized(self):
+        self.run_node("say <|plamo:tag|> please")
+        self.assertNotIn("<|plamo:", self.rt.calls[0][0])
+        self.assertIn("plamo", self.rt.calls[0][0])
+
+    def test_cache_hit_skips_the_model(self):
+        self.assertEqual(self.run_node("same text")[1], "[en]same text")
+        self.assertEqual(len(self.rt.calls), 1)
+        # Same text + settings → served from the LRU, no new call.
+        self.assertEqual(self.run_node("same text")[1], "[en]same text")
+        self.assertEqual(len(self.rt.calls), 1)
+        # Any setting that changes the translation is part of the key.
+        self.run_node("same text", target_language="Japanese")
+        self.assertEqual(len(self.rt.calls), 2)
+        self.run_node("same text", d_tag_mode="Remove")
+        self.assertEqual(len(self.rt.calls), 3)
+        self.run_node("same text", max_new_tokens=9)
+        self.assertEqual(len(self.rt.calls), 4)
+        # use_cache=False bypasses the lookup (but still stores the result).
+        self.run_node("same text", use_cache=False)
+        self.assertEqual(len(self.rt.calls), 5)
+
+    def test_cache_hit_does_not_load_the_model(self):
+        self.run_node("warm")
+        loaded = []
+        nodes._plamo_get_runtime = lambda device="auto": loaded.append(1) or self.rt
+        self.run_node("warm")
+        self.assertEqual(loaded, [])
+
+    def test_unload_after(self):
+        self.run_node("x", unload_after=False)
+        self.assertEqual(self.unloads, [])
+        self.run_node("y", unload_after=True)
+        self.assertEqual(self.unloads, [True])
+
+    def test_runtime_error_is_wrapped_and_still_unloads(self):
+        def boom(text, lang):
+            raise ValueError("kaboom")
+        self.rt.fn = boom
+        with self.assertRaises(RuntimeError) as cm:
+            self.run_node("x", unload_after=True)
+        self.assertIn("[PlamoTranslate-F]", str(cm.exception))
+        self.assertIn("ValueError: kaboom", str(cm.exception))
+        self.assertEqual(self.unloads, [True])
+        # Nothing was cached for the failed text.
+        self.assertEqual(len(nodes._PLAMO_CACHE), 0)
+
+    def test_oom_hint(self):
+        def boom(text, lang):
+            raise RuntimeError("CUDA out of memory. Tried to allocate 2 GiB")
+        self.rt.fn = boom
+        with self.assertRaises(RuntimeError) as cm:
+            self.run_node("x")
+        self.assertIn("VRAM", str(cm.exception))
+        self.assertIn("`cpu`", str(cm.exception))
+
+    def test_lru_evicts_oldest(self):
+        lru = nodes._PlamoLRU(2)
+        lru.put("a", 1)
+        lru.put("b", 2)
+        lru.get("a")          # a is now the most recent
+        lru.put("c", 3)       # evicts b
+        self.assertEqual(lru.get("b"), None)
+        self.assertEqual(lru.get("a"), 1)
+        self.assertEqual(lru.get("c"), 3)
+        self.assertEqual(len(lru), 2)
+
+    def test_numba_stub_lets_the_tokenizer_code_import(self):
+        # The model's tokenizer does `from numba import njit` at import time.
+        # With the stub, that import succeeds, @njit is a no-op, and
+        # numba.typed.Dict is a plain dict — and sys.modules is restored.
+        import sys
+        import tempfile
+        src = (
+            "from numba import njit\n"
+            "from numba.core import types\n"
+            "from numba.typed import Dict\n"
+            "@njit\n"
+            "def f(x):\n"
+            "    return x + 1\n"
+            "D = Dict.empty(key_type=types.int64, value_type=types.int32)\n"
+            "D[1] = 2\n"
+        )
+        before = sys.modules.get("numba")
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "fake_tok.py")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(src)
+            mod = nodes._plamo_import_file("ppf_test_fake_tok", path, numba_stub=True)
+        self.assertEqual(mod.f(1), 2)
+        self.assertEqual(dict(mod.D), {1: 2})
+        self.assertIs(sys.modules.get("numba"), before)
+
+    def test_model_dir_completeness_check(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            self.assertFalse(nodes._plamo_is_complete(d))
+            for name in nodes._PLAMO_REQUIRED_FILES:
+                with open(os.path.join(d, name), "w") as f:
+                    f.write("x")
+            self.assertTrue(nodes._plamo_is_complete(d))
+            # A complete directory is returned without any download attempt.
+            self.assertEqual(nodes._plamo_ensure_model(d), d)
+
+    def test_input_order_is_stable(self):
+        # New optional inputs must be appended, never inserted (widgets_values
+        # is index-based in saved workflows).
+        spec = PlamoTranslate_F.INPUT_TYPES()
+        self.assertEqual(list(spec["required"]), ["text", "target_language"])
+        self.assertEqual(
+            list(spec["optional"]),
+            ["d_tag_mode", "japanese_form", "max_new_tokens", "use_cache", "unload_after", "device"],
+        )
 
 
 if __name__ == "__main__":
