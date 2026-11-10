@@ -2184,6 +2184,29 @@ def _plamo_is_complete(model_dir):
     )
 
 
+_PLAMO_HTTP_LOGGERS = ("httpx", "httpx2", "httpcore")
+
+
+class _plamo_quiet_http_logs:
+    """Context manager: raise the HTTP client loggers to WARNING while the
+    download runs, then restore their previous levels."""
+
+    def __enter__(self):
+        import logging
+        self._saved = []
+        for name in _PLAMO_HTTP_LOGGERS:
+            logger = logging.getLogger(name)
+            self._saved.append((logger, logger.level))
+            if logger.getEffectiveLevel() < logging.WARNING:
+                logger.setLevel(logging.WARNING)
+        return self
+
+    def __exit__(self, *exc):
+        for logger, level in self._saved:
+            logger.setLevel(level)
+        return False
+
+
 def _plamo_ensure_model(model_dir=None):
     """Return the local model directory, downloading it on first use.
 
@@ -2206,12 +2229,17 @@ def _plamo_ensure_model(model_dir=None):
         f"(about 1.8 GB) to {model_dir} ..."
     )
     try:
-        snapshot_download(
-            repo_id=_PLAMO_REPO_ID,
-            revision=_PLAMO_REVISION,
-            local_dir=model_dir,
-            allow_patterns=_PLAMO_DOWNLOAD_PATTERNS,
-        )
+        # huggingface_hub's HTTP client (httpx / its vendored httpx2) logs
+        # every request at INFO ("HTTP Request: HEAD ..."), which ComfyUI's
+        # console shows. The progress bars are enough; hush those loggers
+        # for the duration of the download only.
+        with _plamo_quiet_http_logs():
+            snapshot_download(
+                repo_id=_PLAMO_REPO_ID,
+                revision=_PLAMO_REVISION,
+                local_dir=model_dir,
+                allow_patterns=_PLAMO_DOWNLOAD_PATTERNS,
+            )
     except Exception as e:
         raise RuntimeError(
             "[PlamoTranslate-F] モデルのダウンロードに失敗しました。ネットワーク接続と"

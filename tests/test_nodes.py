@@ -1188,6 +1188,19 @@ class TestPlamoTranslateF(unittest.TestCase):
             # A complete directory is returned without any download attempt.
             self.assertEqual(nodes._plamo_ensure_model(d), d)
 
+    def test_http_loggers_quiet_only_during_download(self):
+        import logging
+        httpx_log = logging.getLogger("httpx")
+        previous = httpx_log.level
+        httpx_log.setLevel(logging.INFO)
+        try:
+            with nodes._plamo_quiet_http_logs():
+                self.assertEqual(httpx_log.level, logging.WARNING)
+            # Restored afterwards, so the rest of ComfyUI is unaffected.
+            self.assertEqual(httpx_log.level, logging.INFO)
+        finally:
+            httpx_log.setLevel(previous)
+
     def test_input_order_is_stable(self):
         # New optional inputs must be appended, never inserted (widgets_values
         # is index-based in saved workflows).
