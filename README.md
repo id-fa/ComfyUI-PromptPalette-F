@@ -343,6 +343,8 @@ Nodes 2.0モードでは編集モード時の設定行に省略表示されま�
 
 Preferred Networks の翻訳専用モデル **[pfnet/plamo-3-translate-0.8b](https://huggingface.co/pfnet/plamo-3-translate-0.8b)** を `transformers` でローカル実行する翻訳ノードです。`Gemma Translate` と違って **`CLIPLoader` は不要**で、モデルは**初回実行時に自動ダウンロード**されます（約 1.8 GB、保存先は `ComfyUI/models/LLM/plamo-3-translate-0.8b/`）。翻訳元の言語はモデルが自動判定します（53 言語対応）。翻訳先は日本語 / 英語 / 中国語（簡体字・繁体字）です。
 
+![screenshot](examples/plamo_translate.webp)
+
 > 📌 **実行のしかた**: `Gemma Translate` と同じく **Queue Prompt（ワークフロー実行）時に翻訳が走り**、結果がノードの翻訳欄に表示されます。モデルは一度読み込むと ComfyUI を終了するまで保持されます（`unload_after` で実行ごとに解放できます）。VRAM 使用量は bf16 で約 1.8 GB、翻訳 1 回は 0.3〜1.5 秒程度です。
 
 > ⚠️ **ライセンス**: モデルは [PLaMo Community License](https://huggingface.co/pfnet/plamo-3-translate-0.8b) です。個人・非商用利用は無償ですが、商用利用には条件があります（売上規模に応じて登録または別途契約）。利用前にライセンスを確認してください。
