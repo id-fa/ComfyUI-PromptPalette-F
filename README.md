@@ -1,5 +1,22 @@
 # ComfyUI PromptPalette-F
 
+## ノード一覧
+
+| ノード | 説明 |
+|---|---|
+| [PromptPalette-F](#promptpalette-f) | チェックボックスでフレーズをON/OFF、重み調整、グループ一括制御ができるプロンプトエディタ |
+| [Simple Multi Concat Text](#simple-multi-concat-text) | 最大5つのテキスト入力を区切り文字で結合 |
+| [Get First Word](#get-first-word) | 区切り語（文字列または正規表現）より前の部分を取り出す |
+| [Get First Word (List)](#get-first-word-list) | Get First Word をリストの各要素に適用 |
+| [Prompt Tabs](#prompt-tabs) | 名前付きタブで複数のプロンプトを保持し、アクティブなタブの内容を出力 |
+| [Prompt Tabs + Translate](#prompt-tabs--translate) | Prompt Tabs に原文/訳文ペアと即時翻訳ボタン（googletrans）を追加 |
+| [Gemma Translate](#gemma-translate実験的ノード) | CLIPLoader で読み込んだ Gemma4 / Qwen3-VL でワークフロー実行時に翻訳 |
+| [Gemma Image Prompt](#gemma-image-prompt実験的ノード) | 画像や動画を Gemma4 / Qwen3-VL で解析し、画像生成用プロンプトを作成 |
+| [PlamoTranslate-F](#plamotranslate-f) | PLaMo3 翻訳モデルをローカル実行。入力中のリアルタイム翻訳にも対応 |
+| [Node Value Template](#node-value-template) | 他ノードのプロパティ値をテンプレート出力 |
+
+[English](#comfyui-promptpalette-f-1)
+
 ## (共通)インストール
 
 1. ComfyUIの `custom_nodes` ディレクトリにクローン
@@ -524,6 +541,21 @@ Smarty のように、トークンの値へ修飾子を適用できます。`|` 
 # ComfyUI PromptPalette-F
 
 A custom node for ComfyUI that makes prompt editing easier by allowing phrase switching with just mouse operations
+
+### Node list
+
+| Node | Description |
+|---|---|
+| [PromptPalette-F](#comfyui-promptpalette-f-1) | Prompt editor with checkbox toggles, weight adjustment and group batch control |
+| [Simple Multi Concat Text](#simple-multi-concat-text-node) | Joins up to 5 text inputs with a separator |
+| [Get First Word](#get-first-word-node) | Returns the text before a stop word (literal or regex) |
+| [Get First Word (List)](#get-first-word-list-node) | Applies Get First Word to every item of a LIST |
+| [Prompt Tabs](#prompt-tabs-node) | Holds any number of named prompt tabs and outputs the active one |
+| [Prompt Tabs + Translate](#prompt-tabs--translate-node) | Prompt Tabs with a source/translated pair per tab and instant translate buttons (googletrans) |
+| [Gemma Translate](#gemma-translate-node-experimental) | Translates at execution time with a Gemma4 / Qwen3-VL loaded by CLIPLoader |
+| [Gemma Image Prompt](#gemma-image-prompt-node-experimental) | Analyzes an image or video with Gemma4 / Qwen3-VL and writes a text-to-image prompt |
+| [PlamoTranslate-F](#plamotranslate-f-node) | Local translation with the PLaMo translate model (auto-download); supports live translation while typing |
+| [Node Value Template](#node-value-template-node) | Replaces `%NodeName.widget%` tokens with other nodes' current widget values |
 
 ![Example](examples/example-alt01.png)
 
