@@ -2694,8 +2694,25 @@ class PlamoTranslate_F(BaseNodeClass):
                 d_tag_mode=_PLAMO_D_TAG_OPTIONS[0], japanese_form=_PLAMO_FORM_OPTIONS[0],
                 max_new_tokens=512, use_cache=True, unload_after=False, device="auto"):
         source = text if isinstance(text, str) else ""
+        translated = cls.translate(
+            source, target_language, d_tag_mode, japanese_form, max_new_tokens,
+            use_cache, unload_after, device,
+        )
+        return cls._output(source, translated)
+
+    @classmethod
+    def translate(cls, text="", target_language="English",
+                  d_tag_mode=_PLAMO_D_TAG_OPTIONS[0], japanese_form=_PLAMO_FORM_OPTIONS[0],
+                  max_new_tokens=512, use_cache=True, unload_after=False, device="auto"):
+        """Translate ``text`` and return the translation (a plain string).
+
+        Shared by graph execution (execute) and the Live route
+        (POST /promptpalette_f/plamo_translate), so both produce the same
+        result and fill the same LRU cache. Raises a bilingual RuntimeError on
+        failure."""
+        source = text if isinstance(text, str) else ""
         if not source.strip():
-            return cls._output(source, "")
+            return ""
 
         target_code = cls._target_code(target_language)
         form = cls._form_code(japanese_form, target_code)
@@ -2706,7 +2723,7 @@ class PlamoTranslate_F(BaseNodeClass):
         if use_cache:
             cached = _PLAMO_CACHE.get(key)
             if cached is not None:
-                return cls._output(source, cached)
+                return cached
 
         with _plamo_lock():
             runtime = _plamo_get_runtime(device)
@@ -2735,7 +2752,89 @@ class PlamoTranslate_F(BaseNodeClass):
                 _plamo_unload_runtime()
 
         _PLAMO_CACHE.put(key, translated)
-        return cls._output(source, translated)
+        return translated
+
+
+# ---------------------------------------------------------------------------
+# Live translation for PlamoTranslate-F.
+#
+# The model is a module-level singleton (not tied to graph execution), so the
+# frontend can translate while the user types, without queueing the graph:
+#   POST /promptpalette_f/plamo_translate  {text, target_language, ...}
+#   POST /promptpalette_f/plamo_unload     (Live switched off + unload_after)
+# Both run the blocking work in a worker thread so ComfyUI's event loop (the
+# whole UI) never stalls, and both go through the same lock as execute().
+# ---------------------------------------------------------------------------
+
+def _plamo_is_loaded():
+    rt = _PLAMO_RUNTIME
+    return rt is not None and getattr(rt, "model", None) is not None
+
+
+def _plamo_job_running():
+    """True while ComfyUI is executing a prompt. Loading our model then would
+    call free_memory() under the running job's feet, so Live waits instead."""
+    try:
+        from server import PromptServer
+        queue = PromptServer.instance.prompt_queue
+        return len(getattr(queue, "currently_running", {}) or {}) > 0
+    except Exception:
+        return False
+
+
+def _plamo_live_int(value, default, low, high):
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(low, min(high, value))
+
+
+async def _plamo_live_translate(data):
+    """Body of the Live route. Returns the JSON-able response dict:
+    {"translated": str} / {"busy": True} / {"error": str}. Never raises.
+    ``unload_after`` is deliberately ignored here — unloading after every
+    keystroke pause would reload the model each time; the frontend asks for the
+    unload once, when Live is switched off."""
+    if not isinstance(data, dict):
+        data = {}
+    text = data.get("text", "")
+    if not isinstance(text, str) or not text.strip():
+        return {"translated": ""}
+    if not _plamo_is_loaded() and _plamo_job_running():
+        return {"busy": True}
+
+    def work():
+        return PlamoTranslate_F.translate(
+            text,
+            data.get("target_language", "English"),
+            data.get("d_tag_mode", _PLAMO_D_TAG_OPTIONS[0]),
+            data.get("japanese_form", _PLAMO_FORM_OPTIONS[0]),
+            _plamo_live_int(data.get("max_new_tokens"), 512, 1, 4096),
+            bool(data.get("use_cache", True)),
+            False,
+            "cpu" if str(data.get("device", "auto")).lower() == "cpu" else "auto",
+        )
+
+    import asyncio
+    try:
+        translated = await asyncio.get_running_loop().run_in_executor(None, work)
+    except Exception as e:
+        return {"error": str(e)}
+    return {"translated": translated}
+
+
+async def _plamo_live_unload():
+    def work():
+        with _plamo_lock():
+            _plamo_unload_runtime()
+
+    import asyncio
+    try:
+        await asyncio.get_running_loop().run_in_executor(None, work)
+    except Exception as e:
+        return {"error": str(e)}
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------
@@ -2866,6 +2965,23 @@ try:
                 return _ppf_web.json_response({"error": str(e)}, status=500)
 
         _ppf_server._ppf_translate_registered = True
+
+    if _ppf_server is not None and not getattr(_ppf_server, "_ppf_plamo_live_registered", False):
+        @_ppf_server.routes.post("/promptpalette_f/plamo_translate")
+        async def _ppf_plamo_translate_route(request):
+            try:
+                data = await request.json()
+            except Exception:
+                data = {}
+            result = await _plamo_live_translate(data)
+            return _ppf_web.json_response(result, status=500 if "error" in result else 200)
+
+        @_ppf_server.routes.post("/promptpalette_f/plamo_unload")
+        async def _ppf_plamo_unload_route(request):
+            result = await _plamo_live_unload()
+            return _ppf_web.json_response(result, status=500 if "error" in result else 200)
+
+        _ppf_server._ppf_plamo_live_registered = True
 except Exception:
     # No server context (e.g. unit import) — the node still loads; translation
     # just won't be available until ComfyUI's server is running.

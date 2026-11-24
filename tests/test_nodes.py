@@ -1201,6 +1201,69 @@ class TestPlamoTranslateF(unittest.TestCase):
         finally:
             httpx_log.setLevel(previous)
 
+    # --- Live route (POST /promptpalette_f/plamo_translate) ---------------
+
+    def live(self, data):
+        import asyncio
+        return asyncio.run(nodes._plamo_live_translate(data))
+
+    def test_live_translates_with_the_same_logic_and_cache(self):
+        out = self.live({"text": "A <d>x</d> B", "target_language": "Japanese"})
+        self.assertEqual(out, {"translated": "[ja]A <d>x</d> [ja]B"})
+        # The graph run of the same text is then served from the shared LRU.
+        calls = len(self.rt.calls)
+        self.assertEqual(
+            self.run_node("A <d>x</d> B", target_language="Japanese")[1],
+            "[ja]A <d>x</d> [ja]B",
+        )
+        self.assertEqual(len(self.rt.calls), calls)
+
+    def test_live_blank_text_does_not_load_the_model(self):
+        loaded = []
+        nodes._plamo_get_runtime = lambda device="auto": loaded.append(1) or self.rt
+        self.assertEqual(self.live({"text": "  \n"}), {"translated": ""})
+        self.assertEqual(self.live({}), {"translated": ""})
+        self.assertEqual(self.live(None), {"translated": ""})
+        self.assertEqual(loaded, [])
+
+    def test_live_never_unloads(self):
+        # unload_after is ignored by Live (it would reload on every pause).
+        self.live({"text": "x", "unload_after": True})
+        self.assertEqual(self.unloads, [])
+
+    def test_live_error_is_returned_not_raised(self):
+        def boom(text, lang):
+            raise ValueError("kaboom")
+        self.rt.fn = boom
+        out = self.live({"text": "x"})
+        self.assertIn("[PlamoTranslate-F]", out["error"])
+        self.assertIn("kaboom", out["error"])
+
+    def test_live_bad_settings_fall_back_to_defaults(self):
+        self.live({"text": "x", "max_new_tokens": "junk", "device": 5})
+        self.assertEqual(self.rt.calls[0][3], 512)
+        self.rt.calls.clear()
+        self.live({"text": "y", "max_new_tokens": 999999})
+        self.assertEqual(self.rt.calls[0][3], 4096)
+
+    def test_live_waits_while_a_job_runs_and_the_model_is_not_loaded(self):
+        orig_running, orig_loaded = nodes._plamo_job_running, nodes._plamo_is_loaded
+        try:
+            nodes._plamo_job_running = lambda: True
+            nodes._plamo_is_loaded = lambda: False
+            self.assertEqual(self.live({"text": "x"}), {"busy": True})
+            self.assertEqual(self.rt.calls, [])
+            # Already loaded -> no free_memory() needed, so it may translate.
+            nodes._plamo_is_loaded = lambda: True
+            self.assertEqual(self.live({"text": "x"}), {"translated": "[en]x"})
+        finally:
+            nodes._plamo_job_running, nodes._plamo_is_loaded = orig_running, orig_loaded
+
+    def test_live_unload_route(self):
+        import asyncio
+        self.assertEqual(asyncio.run(nodes._plamo_live_unload()), {"ok": True})
+        self.assertEqual(self.unloads, [True])
+
     def test_input_order_is_stable(self):
         # New optional inputs must be appended, never inserted (widgets_values
         # is index-based in saved workflows).
