@@ -376,7 +376,7 @@ Preferred Networks の翻訳専用モデル **[pfnet/plamo-3-translate-0.8b](htt
 
 > 🆕 **ライブ翻訳（`Live` トグル）**: ON の間だけ、グラフを実行せずにノード単体で翻訳します。`target_language` などの設定を変えたときも再翻訳されます。
 > - `text` に**他ノードを接続している間は無効**です（接続された値はグラフ実行時にしか確定しないため）。
-> - `Live` の状態は**ワークフローに保存されません**（読み込み時は常に OFF）。
+> - `Live` の ON/OFF は**ワークフローに保存されます**（ON のまま保存したワークフローは、読み込んだ時点で Live が有効になり、モデルの読み込みと翻訳が始まります）。
 > - 日本語入力（IME）の変換中は翻訳を待ちます。生成ジョブの実行中・待機中は、終わってから翻訳します。
 > - ライブ翻訳では `unload_after` は毎回は適用されず、**`Live` を OFF にした時点で** `unload_after` が ON ならモデルを解放します。
 > - 初回はモデルのダウンロード／読み込みが入るため時間がかかります。状況とエラーはノード下部の `Live status` 欄に表示されます（ジョブは止まりません）。
@@ -900,7 +900,7 @@ A translation node that runs Preferred Networks' translation-only model **[pfnet
 
 > 🆕 **Live translation (`Live` toggle):** while ON, the node translates on its own without running the graph. Changing `target_language` or another setting re-translates too.
 > - **Inactive while another node is wired into `text`** (a wired value only exists at graph execution).
-> - The `Live` state is **not saved with the workflow** (always OFF after loading).
+> - The `Live` ON/OFF state is **saved with the workflow** (a workflow saved with Live ON starts Live as soon as it is loaded, which loads the model and translates).
 > - Waits while an IME composition is in progress, and while a generation job is running or queued.
 > - `unload_after` is not applied after every live translation; the model is unloaded **when `Live` is switched OFF** if `unload_after` is ON.
 > - The first translation includes the model download / load. Progress and errors are shown in the `Live status` field at the bottom of the node (no job is stopped).

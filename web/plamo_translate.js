@@ -13,7 +13,8 @@ import { ComfyWidgets } from "../../scripts/widgets.js";
 //   * a "⇅ 入れ替え" button that swaps the source and translated text, and
 //   * a "Live" toggle: while ON, the source text is watched and translated
 //     through POST /promptpalette_f/plamo_translate once typing pauses — no
-//     Queue Prompt needed. Not saved with the workflow (always starts OFF) and
+//     Queue Prompt needed. The ON/OFF state is saved with the workflow (in
+//     `node.properties`, see LIVE_PROP; new nodes start OFF) and it is
 //     inactive while the `text` input is wired from another node.
 // All are native widgets so they work in the Classic (LiteGraph) and Nodes 2.0
 // (Vue) renderers without the DOM-widget machinery the tab nodes need.
@@ -32,6 +33,17 @@ const LIVE_SETTING_NAMES = [
   "use_cache",
   "device",
 ];
+
+// Where the Live ON/OFF state is persisted. A node property (not
+// `widgets_values`) so the saved widget indices never shift.
+const LIVE_PROP = "plamo_live";
+
+function setLiveProp(node, on) {
+  if (!node.properties) {
+    node.properties = {};
+  }
+  node.properties[LIVE_PROP] = !!on;
+}
 
 function findWidget(node, name) {
   return node.widgets?.find((w) => w.name === name);
@@ -242,12 +254,17 @@ function startLive(node) {
     timer: null,
   };
   node._plamoLive = state;
+  setLiveProp(node, true);
   state.timer = setInterval(() => liveTick(node, state), LIVE_POLL_MS);
   setLiveStatus(node, "");
 }
 
-// `silent` skips the unload request (restart / node removal / workflow load).
+// `silent` skips the unload request and leaves the saved ON/OFF state alone
+// (restart / node removal / workflow load).
 function stopLive(node, silent = false) {
+  if (!silent) {
+    setLiveProp(node, false);
+  }
   const state = node._plamoLive;
   if (!state) {
     return;
@@ -265,7 +282,8 @@ function stopLive(node, silent = false) {
 
 // Add the Live toggle + its status line exactly once. Both are frontend-only:
 // `serialize: false` keeps them out of the prompt, and they are appended after
-// every other widget so saved `widgets_values` indices never shift.
+// every other widget so saved `widgets_values` indices never shift. The toggle
+// state itself is saved through `node.properties[LIVE_PROP]`.
 function ensureLiveWidgets(node) {
   if (node._plamoLiveToggle) {
     return;
@@ -286,7 +304,7 @@ function ensureLiveWidgets(node) {
   toggle.serialize = false;
   toggle.tooltip =
     "ON の間、text の入力が止まったタイミングで自動翻訳します（Queue 不要）。" +
-    "text に他ノードを接続している間は無効。ワークフローには保存されません。";
+    "text に他ノードを接続している間は無効。ON/OFF はワークフローに保存されます。";
   node._plamoLiveToggle = toggle;
 
   const status = node.addWidget("text", "Live status", "", () => {}, { serialize: false });
@@ -295,14 +313,19 @@ function ensureLiveWidgets(node) {
   node._plamoLiveStatus = status;
 }
 
-// Live is never restored from a saved workflow: force it OFF after a load.
-function resetLive(node) {
+// After a workflow load: bring Live back to the state saved with the node
+// (OFF for workflows saved before the state was persisted).
+function restoreLive(node) {
+  const on = node.properties?.[LIVE_PROP] === true;
   stopLive(node, true);
   if (node._plamoLiveToggle) {
-    node._plamoLiveToggle.value = false;
+    node._plamoLiveToggle.value = on;
   }
   if (node._plamoLiveStatus) {
     node._plamoLiveStatus.value = "";
+  }
+  if (on) {
+    startLive(node);
   }
 }
 
@@ -325,7 +348,7 @@ app.registerExtension({
     const onConfigure = nodeType.prototype.onConfigure;
     nodeType.prototype.onConfigure = function () {
       const result = onConfigure?.apply(this, arguments);
-      resetLive(this);
+      restoreLive(this);
       return result;
     };
 

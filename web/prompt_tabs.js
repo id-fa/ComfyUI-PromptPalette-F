@@ -293,6 +293,8 @@ function setupPromptTabs(node) {
 
     const label = document.createElement("span");
     label.textContent = tab.name || `Tab ${i + 1}`;
+    // Long names are cut with an ellipsis (maxWidth) — show the full name on hover.
+    label.title = label.textContent;
     Object.assign(label.style, {
       overflow: "hidden",
       textOverflow: "ellipsis",
